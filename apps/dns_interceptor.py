@@ -15,9 +15,9 @@ class DNSInterceptor(app_manager.RyuApp):
         self.logger.setLevel(logging.INFO)
         self.logger.info("DNS Interceptor started - will reply with virtual IPs")
 
-        # تعریف نگاشت ساده: نام دامنه → آدرس مجازی
+        # Define a simple mapping: domain name → virtual IP
         self.domain_to_virtual_ip = {
-            "host2.com": "192.168.1.2"
+            "host2.com": "10.0.0.100"
         }
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -28,17 +28,17 @@ class DNSInterceptor(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         pkt = packet.Packet(msg.data)
 
-        # استخراج پروتکل‌ها
+        # Extract protocols
         eth = pkt.get_protocol(ethernet.ethernet)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         udp_pkt = pkt.get_protocol(udp.udp)
 
-        # پردازش فقط بسته‌های DNS (درخواست به پورت 53)
+        # Process only DNS packets (requests to port 53)
         if not (eth and ip_pkt and udp_pkt and udp_pkt.dst_port == 53):
             return
 
         try:
-            # پیدا کردن پیلود DNS
+            # Locate DNS payload
             protocols = pkt.protocols
             udp_index = protocols.index(udp_pkt)
             if udp_index + 1 >= len(protocols):
@@ -47,33 +47,33 @@ class DNSInterceptor(app_manager.RyuApp):
             if not isinstance(dns_payload, bytes) or len(dns_payload) < 12:
                 return
 
-            # تحلیل درخواست DNS
+            # Parse DNS request
             dns_req = DNSRecord.parse(dns_payload)
             if not dns_req.questions:
                 return
 
-            # دریافت نام دامنه درخواست شده
+            # Extract requested domain name
             q = dns_req.questions[0]
             qname = str(q.get_qname())
-            domain = qname.rstrip('.')  # حذف نقطه پایانی
+            domain = qname.rstrip('.')  # Remove trailing dot
 
-            # بررسی اینکه آیا این دامنه در لیست ما است
+            # Check if this domain is in our protected list
             if domain not in self.domain_to_virtual_ip:
                 self.logger.info(f"Ignoring DNS query for non-protected domain: {domain}")
                 return
 
-            # دریافت آدرس مجازی
+            # Get virtual IP
             virtual_ip = self.domain_to_virtual_ip[domain]
             self.logger.info(f"Intercepting DNS query for {domain} → replying with {virtual_ip}")
 
-            # ساخت پاسخ DNS
+            # Construct DNS reply
             dns_reply = DNSRecord(
                 header=DNSHeader(id=dns_req.header.id, qr=1, aa=1, ra=1),
                 q=dns_req.q
             )
             dns_reply.add_answer(RR(qname, QTYPE.A, rdata=A(virtual_ip), ttl=0))
 
-            # ساخت بسته پاسخ
+            # Build reply packet
             reply_pkt = packet.Packet()
             reply_pkt.add_protocol(ethernet.ethernet(
                 ethertype=eth.ethertype,
@@ -81,17 +81,17 @@ class DNSInterceptor(app_manager.RyuApp):
                 src=eth.dst
             ))
             reply_pkt.add_protocol(ipv4.ipv4(
-                src=ip_pkt.dst,  # سرور DNS (مثلاً 10.0.0.10)
-                dst=ip_pkt.src,  # کلاینت (مثلاً 10.0.0.1)
+                src=ip_pkt.dst,  # DNS server (e.g., 10.0.0.10)
+                dst=ip_pkt.src,  # Client (e.g., 10.0.0.1)
                 proto=ip_pkt.proto
             ))
             reply_pkt.add_protocol(udp.udp(
                 src_port=udp_pkt.dst_port,  # 53
-                dst_port=udp_pkt.src_port   # پورت کلاینت
+                dst_port=udp_pkt.src_port   # Client port
             ))
             reply_pkt.add_protocol(dns_reply.pack())
 
-            # نوشتن و ارسال پاسخ
+            # Serialize and send reply
             reply_pkt.serialize()
             out = parser.OFPPacketOut(
                 datapath=datapath,
@@ -101,6 +101,28 @@ class DNSInterceptor(app_manager.RyuApp):
                 data=reply_pkt.data
             )
             datapath.send_msg(out)
+
+            # BLOCK FUTURE DNS RESPONSES FROM REAL DNS SERVER
+            # Install a high-priority flow rule to DROP any future DNS response from the real DNS server
+            match = parser.OFPMatch(
+                eth_type=0x0800,           # IPv4
+                ip_proto=17,               # UDP
+                ipv4_src="10.0.0.10",      # Real DNS server IP
+                ipv4_dst=ip_pkt.src,       # Client IP
+                udp_src=53,                # DNS port
+                udp_dst=udp_pkt.src_port   # Client's DNS query port
+            )
+            # No actions = DROP
+            inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, [])]
+            mod = parser.OFPFlowMod(
+                datapath=datapath,
+                priority=200,              # Higher than normal flows
+                match=match,
+                instructions=inst,
+                hard_timeout=10            # Block for 10 seconds (enough for DNS resolution)
+            )
+            datapath.send_msg(mod)
+            self.logger.info(f"Blocked future DNS responses from 10.0.0.10 to {ip_pkt.src}:{udp_pkt.src_port}")
 
         except Exception as e:
             self.logger.error(f"Error handling DNS query: {e}")
