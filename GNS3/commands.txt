@@ -1,0 +1,23 @@
+ovs switches :
+ip addr add 172.16.1.20/24 dev br0
+ovs-vsctl set-controller br0 tcp:172.16.1.100:6653
+ovs-vsctl set bridge br0 protocols=OpenFlow13
+ovs-vsctl set bridge br0 stp_enable=true
+ovs-vsctl show
+
+controller:
+ip addr add 172.16.1.100/24 dev enp0s8
+sudo ufw disable 
+// or : 
+sudo ufw allow 6653/tcp
+source venv/bin/activate
+ryu-manager simple_switch_13.py --observe-links
+
+hosts:
+ip dns 10.0.0.10
+
+dns:
+echo "10.0.0.1 host1.com host1" >> /etc/hosts
+echo "10.0.0.1 host2.com host2" >> /etc/hosts
+
+

@@ -18,11 +18,11 @@ A transparent **Moving Target Defense (MTD)** implementation for Software-Define
 | Sees ONLY      | ARP |  | Switch |     | Switch |    | DNS | UDP |                  |
 | 10.0.0.11      |<----|<-| (S1)   |<----| (S2)   |<---+     |<----|                  |
 +----------------+     |  +--------+     +--------+          |     +------------------+
-                       |         ↑                           |
-                       |         | Ryu Controller            |
-                       |         | • DNS Response Modification|
-                       |         | • Edge-Only IP Translation |
-                       |         | • Topology-Aware Routing   |
+                       |        ↑                            |
+                       |        | Ryu Controller             |
+                       |        | • DNS Response Modification|
+                       |        | • Edge-Only IP Translation |
+                       |        | • Topology-Aware Routing   |
                        +-------------------------------------+
 ```
 
@@ -339,5 +339,4 @@ limitations under the License.
 
 ---
 
-**Developed with ❤️ for SDN Security Research**  
-*Ali © 2026*
+*Ali Tavakkoli © 2026*
