@@ -154,6 +154,77 @@ Based on your GNS3 topology:
 ### Step-by-Step Setup
 
 #### 1. Controller Configuration (`ubuntu-MTD-1`)
+Here's your netplan configuration integrated into the README.md file under a dedicated **Controller Network Configuration** subsection. I've added context explaining each interface's role in your GNS3/MTD setup:
+
+---
+
+## 🌐 GNS3 Deployment Guide
+
+### Controller Network Configuration (`ubuntu-MTD-1`)
+
+Your Ubuntu controller VM requires three network interfaces for proper operation in GNS3:
+
+| Interface | IP Address       | Purpose                                                                 | Connection Target          |
+|-----------|------------------|-------------------------------------------------------------------------|----------------------------|
+| `enp0s3`  | DHCP-assigned    | **Internet access** (NAT) for package installation & updates            | VirtualBox NAT             |
+| `enp0s8`  | `172.16.1.100/24`| **SDN Control Plane** – Connects to Open vSwitch management interfaces  | GNS3 Management Network    |
+| `enp0s9`  | `192.168.56.110/24`| **GNS3 VM Management** – Host-only access for SSH/console from host OS | VirtualBox Host-Only Adapter |
+
+#### Netplan Configuration (`/etc/netplan/01-network-manager-all.yaml`)
+```yaml
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    enp0s3:
+      dhcp4: true
+      dhcp-identifier: mac
+
+    enp0s8:
+      addresses:
+        - 172.16.1.100/24
+      dhcp4: false
+    
+    enp0s9:
+      addresses:
+        - 192.168.56.110/24
+      dhcp4: false
+```
+
+#### Apply Configuration
+```bash
+sudo netplan apply
+```
+
+#### Verify Interfaces
+```bash
+ip -br addr show | grep -E "enp0s[389]"
+# Expected output:
+# enp0s3    UP    10.0.2.15/24        # (DHCP-assigned NAT address)
+# enp0s8    UP    172.16.1.100/24     # SDN control plane
+# enp0s9    UP    192.168.56.110/24   # GNS3 host management
+```
+
+### Controller Startup Procedure
+```bash
+# 1. Verify network connectivity to switches
+ping -c 2 172.16.1.20  # Test connection to first OVS switch
+
+# 2. Disable firewall (for testing) OR allow OpenFlow port
+sudo ufw disable
+# OR for production-like testing:
+sudo ufw allow 6653/tcp  # OpenFlow control channel
+
+# 3. Activate virtual environment (CRITICAL!)
+cd /path/to/mtd-ip-shuffling
+source venv/bin/activate
+
+# 4. Start the MTD controller with topology discovery
+PYTHONPATH=. ryu-manager mtd_ip_shuffling.app ./flowmanager/flowmanager.py --observe-links
+```
+
+> 💡 **Pro Tip**: The `172.16.1.0/24` subnet (`enp0s8`) is your **SDN control plane** – all Open vSwitch instances must have management interfaces in this subnet with unique IPs (e.g., `172.16.1.20`, `172.16.1.21`, etc.) pointing to your controller at `172.16.1.100:6653`.
+
 ```bash
 # Configure management interface (connects to OVS switches)
 sudo ip addr add 172.16.1.100/24 dev enp0s8
