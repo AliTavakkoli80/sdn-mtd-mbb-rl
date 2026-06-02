@@ -95,3 +95,22 @@ class FlowManager:
                                       in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
         self.app.logger.debug(f"[normal] flow for {src_ip}→{dst_ip}")
+
+    def flush_translation_flows(self, datapath):
+        """Deletes all flows with PRIORITY_TRANSLATION on a specific datapath."""
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        
+        # Match any IPv4 packet (eth_type=0x0800) to target our translation flows
+        match = parser.OFPMatch(eth_type=const.ETH_TYPE_IP)
+        
+        mod = parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofproto.OFPFC_DELETE,
+            out_group=ofproto.OFPG_ANY,
+            out_port=ofproto.OFPP_ANY,
+            match=match,
+            priority=const.PRIORITY_TRANSLATION
+        )
+        datapath.send_msg(mod)
+        self.app.logger.debug(f"[flow] 🗑️ Flushed translation flows on S{datapath.id}")    
