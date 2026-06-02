@@ -1,6 +1,7 @@
 from ryu.lib.packet import packet, ethernet, ipv4, udp
 from . import constants as const
 from dnslib import DNSRecord, QTYPE, A
+import socket
 
 class IPv4Handler:
     def __init__(self, app):
@@ -49,14 +50,22 @@ class IPv4Handler:
 
     def _handle_dns_response(self, datapath, in_port, pkt, eth, ipv4_pkt, udp_pkt, buffer_id, raw_data):
         try:
+            # 1. Dynamically find the start of the IP header (Handles VLAN tags safely)
+            ip_start = 14
+            if len(raw_data) >= 18 and raw_data[12:14] == b'\x81\x00':
+                ip_start = 18 # 802.1Q VLAN tag present
+                
             ip_hdr_len = ipv4_pkt.header_length * 4
-            dns_start = 14 + ip_hdr_len + 8
+            udp_start = ip_start + ip_hdr_len
+            dns_start = udp_start + 8
+            
             if len(raw_data) < dns_start + 12:
                 self._forward_original(datapath, in_port, buffer_id, raw_data)
                 return
 
-            dns_payload = raw_data[dns_start:]
-            dns_resp = DNSRecord.parse(dns_payload)
+            # 2. Parse the DNS payload
+            dns_payload = bytearray(raw_data[dns_start:])
+            dns_resp = DNSRecord.parse(bytes(dns_payload))
 
             if not (dns_resp.header.qr == 1 and dns_resp.rr):
                 self._forward_original(datapath, in_port, buffer_id, raw_data)
@@ -68,18 +77,50 @@ class IPv4Handler:
                     real_ip = str(rr.rdata)
                     if real_ip in self.app.real_to_virtual:
                         virt_ip = self.app.real_to_virtual[real_ip]
-                        rr.rdata = A(virt_ip)
-                        modified = True
-                        self.app.logger.info(f"[dns] {real_ip} → {virt_ip}")
+                        
+                        # 🛠️ BULLETPROOF PATCH: Find and replace the exact 4 bytes in the payload
+                        real_bytes = socket.inet_aton(real_ip)
+                        virt_bytes = socket.inet_aton(virt_ip)
+                        
+                        idx = dns_payload.find(real_bytes)
+                        if idx != -1:
+                            dns_payload[idx:idx+4] = virt_bytes
+                            modified = True
+                            self.app.logger.info(f"[dns] {real_ip} → {virt_ip}")
 
             if not modified:
                 self._forward_original(datapath, in_port, buffer_id, raw_data)
                 return
 
-            new_dns_data = dns_resp.pack()
-            new_pkt = self._build_packet(eth, ipv4_pkt, udp_pkt, new_dns_data)
-            new_pkt.serialize()
+            # 3. Splice the modified DNS payload back into the original raw packet
+            patched_raw_data = bytearray(raw_data)
+            patched_raw_data[dns_start:dns_start+len(dns_payload)] = dns_payload
 
+            # 4. Recalculate the IP Header Checksum (RFC 1071)
+            patched_raw_data[ip_start + 10] = 0  # Zero out old checksum
+            patched_raw_data[ip_start + 11] = 0
+            
+            ip_header = patched_raw_data[ip_start:ip_start+ip_hdr_len]
+            if len(ip_header) % 2 == 1:
+                ip_header += b'\0' # Pad if odd length
+                
+            s = 0
+            for i in range(0, len(ip_header), 2):
+                w = (ip_header[i] << 8) + ip_header[i+1]
+                s += w
+            s = (s >> 16) + (s & 0xffff)
+            s += (s >> 16)
+            new_csum = (~s) & 0xffff
+            
+            patched_raw_data[ip_start + 10] = (new_csum >> 8) & 0xff
+            patched_raw_data[ip_start + 11] = new_csum & 0xff
+
+            # 5. Force UDP Checksum to 0 (Valid for IPv4, prevents Linux kernel from dropping)
+            udp_csum_offset = udp_start + 6
+            patched_raw_data[udp_csum_offset] = 0
+            patched_raw_data[udp_csum_offset + 1] = 0
+
+            # 6. Send the mathematically perfect packet
             client_ip = ipv4_pkt.dst
             dpid, port = self.app.topology.get_host_location_by_ip(client_ip)
             if dpid and port:
@@ -91,45 +132,18 @@ class IPv4Handler:
                         buffer_id=dp.ofproto.OFP_NO_BUFFER,
                         in_port=dp.ofproto.OFPP_CONTROLLER,
                         actions=actions,
-                        data=new_pkt.data
+                        data=bytes(patched_raw_data)
                     )
                     dp.send_msg(out)
                     self.app.logger.info(f"[dns] direct to client {client_ip}")
                     return
 
             self.app.logger.warning("[dns] client unknown - fallback")
-            self._forward_original(datapath, in_port, buffer_id, new_pkt.data)
+            self._forward_original(datapath, in_port, buffer_id, bytes(patched_raw_data))
 
         except Exception as e:
             self.app.logger.error(f"[dns] error: {e}")
             self._forward_original(datapath, in_port, buffer_id, raw_data)
-
-    def _build_packet(self, eth, ipv4_pkt, udp_pkt, dns_data):
-        p = packet.Packet()
-        p.add_protocol(ethernet.ethernet(dst=eth.dst, src=eth.src, ethertype=eth.ethertype))
-        p.add_protocol(ipv4.ipv4(
-            version=ipv4_pkt.version,
-            header_length=ipv4_pkt.header_length,
-            tos=ipv4_pkt.tos,
-            total_length=20 + 8 + len(dns_data),
-            identification=ipv4_pkt.identification,
-            flags=ipv4_pkt.flags,
-            offset=ipv4_pkt.offset,
-            ttl=ipv4_pkt.ttl,
-            proto=ipv4_pkt.proto,
-            csum=0,
-            src=ipv4_pkt.src,
-            dst=ipv4_pkt.dst,
-            option=ipv4_pkt.option
-        ))
-        p.add_protocol(udp.udp(
-            src_port=udp_pkt.src_port,
-            dst_port=udp_pkt.dst_port,
-            total_length=8 + len(dns_data),
-            csum=0
-        ))
-        p.add_protocol(dns_data)
-        return p
 
     def _forward_original(self, datapath, in_port, buffer_id, data):
         actions = [datapath.ofproto_parser.OFPActionOutput(datapath.ofproto.OFPP_NORMAL)]

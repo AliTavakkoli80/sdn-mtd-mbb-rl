@@ -14,6 +14,7 @@ from .packet_handler import PacketInHandler
 from .arp_handler import ARPHandler
 from .ipv4_handler import IPv4Handler
 from .mtd_engine import MTDEngine
+from .threat_detector import ThreatDetector
 
 LOG = setup_logging()
 
@@ -52,6 +53,8 @@ class MTDMovingTargetDefense(app_manager.RyuApp):
 
         # Start MTD Shuffling Engine
         self.mtd_engine.start()
+
+        self.threat_detector = ThreatDetector(self)
 
         LOG.info("="*80)
         LOG.info("🚀 MTD IP SHUFFLING CONTROLLER STARTED")

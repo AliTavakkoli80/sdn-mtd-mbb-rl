@@ -11,6 +11,7 @@ class ARPHandler:
         self.app.topology.register_host(datapath.id, in_port, arp_pkt.src_ip, arp_pkt.src_mac)
 
         if arp_pkt.opcode == arp.ARP_REQUEST:
+            self.app.threat_detector.process_arp_request(arp_pkt.src_ip, arp_pkt.dst_ip)
             self._handle_request(datapath, in_port, pkt, eth, arp_pkt, buffer_id)
         else:
             self._handle_reply(datapath, in_port, pkt, eth, arp_pkt, buffer_id)
