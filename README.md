@@ -1,10 +1,4 @@
-Here is the fully updated and expanded `README.md`. I have integrated all the new Master's thesis features we built (the **Randomized Shuffling Engine**, **Threat Detector**, **Bulletproof DNS Patching**, and the **Netshoot/Dnsmasq Docker configurations**). 
 
-You can copy and paste this directly over your existing file.
-
-***
-
-```markdown
 # Moving Target Defense (MTD) IP Shuffling for SDN
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python)](https://www.python.org/)
