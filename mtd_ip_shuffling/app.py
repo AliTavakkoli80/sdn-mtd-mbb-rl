@@ -45,16 +45,15 @@ class MTDMovingTargetDefense(app_manager.RyuApp):
         self.arp_handler = ARPHandler(self)
         self.ipv4_handler = IPv4Handler(self)
 
-        # Initialize MTD Engine (Start with 45 seconds for testing)
-        self.mtd_engine = MTDEngine(self, shuffle_interval=45)
+        self.threat_detector = ThreatDetector(self)
+
+        self.mtd_engine = MTDEngine(self, normal_interval=300, attack_interval=5)
 
         # Start periodic discovery
         self.discover_thread = hub.spawn(self._discovery_loop)
 
         # Start MTD Shuffling Engine
         self.mtd_engine.start()
-
-        self.threat_detector = ThreatDetector(self)
 
         LOG.info("="*80)
         LOG.info("🚀 MTD IP SHUFFLING CONTROLLER STARTED")
