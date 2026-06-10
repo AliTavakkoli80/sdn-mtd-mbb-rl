@@ -1,59 +1,142 @@
 import time
+import math
 from collections import defaultdict
+import numpy as np
 
 class ThreatDetector:
     """
-    Monitors network traffic to detect anomalies like ARP Scanning.
-    This class provides the 'State' observations for the future DRL Agent.
+    Q1-Grade L2/L3/L4 Threat Detector for SDN-based MTD.
+    Uses Information-Theoretic Entropy, EWMA Rate Smoothing, and IAT Fingerprinting.
     """
-    def __init__(self, app):
+    def __init__(self, app, alpha=0.2, rate_threshold=15.0):
         self.app = app
-        # Tracking ARP requests per source IP
-        # Format: {src_ip: {'targets': set(), 'last_seen': float}}
-        self.arp_stats = defaultdict(lambda: {'targets': set(), 'last_seen': 0})
+        self.alpha = alpha
+        self.RATE_THRESHOLD = rate_threshold
         
-        self.WINDOW_SIZE = 10.0  # Sliding window of 10 seconds
-        self.SCAN_THRESHOLD = 10 # 10 unique targets in 10 seconds = scan
+        # 🌟 FIX: Lowered threshold to 0.50 to ensure L2 sweeps trigger the alarm
+        self.ATTACK_THRESHOLD = 0.50
+        self.CLEAR_THRESHOLD = 0.25  # Hysteresis to prevent flapping
         
-        # State flags
+        self.sources = defaultdict(lambda: {
+            'dst_ips': set(), 'dst_ports': set(),
+            'packet_count': 0, 'ewma_rate': 0.0,
+            'last_ts': 0.0, 'iat_list': [],
+            'is_flagged': False
+        })
+        
         self.is_under_attack = False
+        self.max_threat_score = 0.0
+        self.clean_interval = 10.0
+        self.last_cleanup = time.time()
 
-    def process_arp_request(self, src_ip, dst_ip):
-        """Called by ARPHandler whenever an ARP Request is seen."""
-        now = time.time()
-        stats = self.arp_stats[src_ip]
-        
-        # Reset the target set if the sliding window has expired
-        if now - stats['last_seen'] > self.WINDOW_SIZE:
-            stats['targets'] = set()
+    def process_packet(self, src_ip: str, dst_ip: str, dst_port: int, proto: int, timestamp: float = None):
+        """Called by ipv4_handler.py for every IPv4/TCP/UDP packet."""
+        self._update_source(src_ip, dst_ip, dst_port, timestamp)
+
+    def process_arp_request(self, src_ip: str, dst_ip: str, timestamp: float = None):
+        """Called by arp_handler.py for every ARP Request (Layer 2 Sweep Detection)."""
+        self._update_source(src_ip, dst_ip, dst_port=None, timestamp=timestamp)
+
+    def _update_source(self, src_ip, dst_ip, dst_port, timestamp):
+        if timestamp is None:
+            timestamp = time.time()
             
-        stats['last_seen'] = now
+        src = self.sources[src_ip]
+        dt = timestamp - src['last_ts'] if src['last_ts'] > 0 else 1.0
+        src['last_ts'] = timestamp
         
-        # Ignore normal background noise like DNS requests
-        if dst_ip == self.app.dns_ip:
-            return
-
-        # Add the target IP to the set of unique targets
-        stats['targets'].add(dst_ip)
-        unique_targets = len(stats['targets'])
+        inst_rate = 1.0 / max(dt, 0.001)
+        src['ewma_rate'] = self.alpha * inst_rate + (1 - self.alpha) * src['ewma_rate']
         
-        # Check if threshold is breached
-        if unique_targets >= self.SCAN_THRESHOLD:
-            if not self.is_under_attack:
-                self.app.logger.warning(f"🚨 [THREAT] ARP Scan detected from {src_ip}! Targeted {unique_targets} unique IPs in {self.WINDOW_SIZE}s")
-                self.is_under_attack = True
-        else:
-            # Clear flag if scan rate drops below threshold
-            if self.is_under_attack:
-                self.app.logger.info(f"✅ [THREAT] ARP Scan from {src_ip} has stopped.")
-                self.is_under_attack = False
+        src['dst_ips'].add(dst_ip)
+        if dst_port is not None:
+            src['dst_ports'].add(dst_port)
+        src['packet_count'] += 1
+        
+        if dt < 5.0:
+            src['iat_list'].append(dt)
+            if len(src['iat_list']) > 50:
+                src['iat_list'].pop(0)
+                
+        if time.time() - self.last_cleanup > self.clean_interval:
+            self._cleanup_stale_sources()
+            self.last_cleanup = time.time()
+            
+        score = self._compute_threat_score(src)
+        if score > self.max_threat_score:
+            self.max_threat_score = score
+            
+        if self.max_threat_score > self.ATTACK_THRESHOLD and not self.is_under_attack:
+            self.is_under_attack = True
+            self.app.logger.warning(f"🚨 [THREAT] Intelligent scan signature detected from {src_ip} (Score: {score:.3f})")
+        elif self.max_threat_score < self.CLEAR_THRESHOLD and self.is_under_attack:
+            self.is_under_attack = False
+            self.app.logger.info("✅ [THREAT] Scan activity normalized. Network state cleared.")
 
-    def get_state(self):
+    def _compute_threat_score(self, src: dict) -> float:
         """
-        Returns the current state of the environment for the DRL Agent.
-        (We will expand this later as we build the RL model)
+        Returns a normalized threat score [0.0, 1.0].
         """
-        return {
-            'is_under_attack': 1 if self.is_under_attack else 0,
-            'time_since_last_shuffle': 0 # Placeholder for later
-        }
+        # A. Shannon Entropy for Destination IPs
+        n_ips = len(src['dst_ips'])
+        ent_ip = math.log2(n_ips) if n_ips > 1 else 0.0
+        # 🌟 FIX: Normalize by 4.0 (log2(16)). Scanning 16 unique IPs is a definitive sweep.
+        ent_ip_norm = min(ent_ip / 4.0, 1.0)
+            
+        # B. Shannon Entropy for Destination Ports
+        n_ports = len(src['dst_ports'])
+        ent_port = math.log2(n_ports) if n_ports > 1 else 0.0
+        ent_port_norm = min(ent_port / 4.0, 1.0)
+        
+        # C. IAT Coefficient of Variation
+        cv = 1.0
+        if len(src['iat_list']) >= 5:
+            mean_iat = sum(src['iat_list']) / len(src['iat_list'])
+            if mean_iat > 0:
+                var_iat = sum((x - mean_iat) ** 2 for x in src['iat_list']) / len(src['iat_list'])
+                cv = min(math.sqrt(var_iat) / mean_iat, 2.0)
+        cv_norm = max(0.0, 1.0 - (cv / 1.5))
+        
+        # D. Rate normalization
+        rate_norm = min(src['ewma_rate'] / self.RATE_THRESHOLD, 1.0)
+        
+        # 🌟 FIX: Rebalanced weights. 
+        # IP Entropy and Rate are the most reliable indicators for both L2 and L3.
+        score = (0.50 * ent_ip_norm) + (0.20 * ent_port_norm) + (0.10 * cv_norm) + (0.20 * rate_norm)
+        return min(score, 1.0)
+
+    def _cleanup_stale_sources(self):
+        now = time.time()
+        to_remove = [ip for ip, data in self.sources.items() if now - data['last_ts'] > self.clean_interval]
+        for ip in to_remove:
+            del self.sources[ip]
+
+    def get_state(self) -> np.ndarray:
+        """Returns the 5D DRL-ready state vector."""
+        max_ent_ip, max_ent_port, max_rate, max_cv = 0.0, 0.0, 0.0, 0.0
+        
+        for src in self.sources.values():
+            n_ips = len(src['dst_ips'])
+            n_ports = len(src['dst_ports'])
+            
+            # 🌟 FIX: Match the / 4.0 normalization from _compute_threat_score
+            e_ip = min(math.log2(max(n_ips, 1)) / 4.0, 1.0)
+            e_port = min(math.log2(max(n_ports, 1)) / 4.0, 1.0)
+            rate = min(src['ewma_rate'] / self.RATE_THRESHOLD, 1.0)
+            
+            if len(src['iat_list']) >= 5:
+                mean_iat = sum(src['iat_list']) / len(src['iat_list'])
+                var_iat = sum((x - mean_iat) ** 2 for x in src['iat_list']) / len(src['iat_list'])
+                cv = math.sqrt(var_iat) / max(mean_iat, 1e-6)
+                cv_norm = max(0.0, 1.0 - (cv / 1.5))
+            else:
+                cv_norm = 0.0
+                
+            max_ent_ip = max(max_ent_ip, e_ip)
+            max_ent_port = max(max_ent_port, e_port)
+            max_rate = max(max_rate, rate)
+            max_cv = max(max_cv, cv_norm)
+            
+        return np.array([
+            max_ent_ip, max_ent_port, max_rate, max_cv, float(self.is_under_attack)
+        ], dtype=np.float32)

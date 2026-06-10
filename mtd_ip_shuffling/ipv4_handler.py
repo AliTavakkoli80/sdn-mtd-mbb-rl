@@ -1,4 +1,4 @@
-from ryu.lib.packet import packet, ethernet, ipv4, udp
+from ryu.lib.packet import packet, ethernet, ipv4, tcp, udp
 from . import constants as const
 from dnslib import DNSRecord, QTYPE, A
 import socket
@@ -9,9 +9,28 @@ class IPv4Handler:
 
     def handle_ipv4(self, datapath, in_port, pkt, eth, ipv4_pkt, buffer_id, raw_data):
         src, dst = ipv4_pkt.src, ipv4_pkt.dst
-        proto = {1:'ICMP',6:'TCP',17:'UDP'}.get(ipv4_pkt.proto, str(ipv4_pkt.proto))
-        self.app.logger.info(f"[ipv4] {src} → {dst} | {proto} | TTL={ipv4_pkt.ttl}")
+        proto = ipv4_pkt.proto
+        proto_name = {1:'ICMP',6:'TCP',17:'UDP'}.get(proto, str(proto))
+        self.app.logger.info(f"[ipv4] {src} → {dst} | {proto_name} | TTL={ipv4_pkt.ttl}")
         self.app.topology.register_host(datapath.id, in_port, src, eth.src)
+
+        dst_port = None
+        if proto == 6:  # TCP
+            tcp_pkt = pkt.get_protocol(tcp.tcp)
+            if tcp_pkt:
+                dst_port = tcp_pkt.dst_port
+        elif proto == 17:  # UDP
+            udp_pkt = pkt.get_protocol(udp.udp)
+            if udp_pkt:
+                dst_port = udp_pkt.dst_port
+
+        # 🌟 Q1 INTEGRATION: Feed packet to intelligent threat detector
+        self.app.threat_detector.process_packet(
+            src_ip=src,
+            dst_ip=dst,
+            dst_port=dst_port,
+            proto=proto
+        )
 
         # DNS response
         if ipv4_pkt.proto == const.IP_PROTO_UDP:

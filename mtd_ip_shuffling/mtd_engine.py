@@ -77,21 +77,40 @@ class MTDEngine:
                     if state.get('is_under_attack', False) != self.is_accelerated:
                         break
 
+    # def _ai_inference_step(self):
+    #     """Queries the live network state and asks the AI what to do."""
+    #     obs = self._get_live_obs()
+        
+    #     # deterministic=True ensures the AI picks the absolute best action 
+    #     # without random exploration (which is only for training).
+    #     action, _states = self.model.predict(obs, deterministic=True)
+        
+    #     if action == 1: # SHUFFLE
+    #         self.app.logger.info(f"🧠 [AI DECISION] SHUFFLE | Obs: {np.round(obs, 2)}")
+    #         self.step()
+    #         self.last_shuffle_time = time.time()
+    #     else:
+    #         # HOLD - Do nothing, save network overhead
+    #         # We log this less frequently to avoid spamming the console
+    #         pass 
+
     def _ai_inference_step(self):
         """Queries the live network state and asks the AI what to do."""
         obs = self._get_live_obs()
         
-        # deterministic=True ensures the AI picks the absolute best action 
-        # without random exploration (which is only for training).
         action, _states = self.model.predict(obs, deterministic=True)
         
-        if action == 1: # SHUFFLE
+        # 🛡️ SAFETY GUARD: The PPO model is currently undertrained and may output 
+        # random actions due to the Sim2Real gap. We force it to only shuffle if 
+        # the threat detector actually confirms an attack (obs[4] is the threat_flag).
+        # NOTE: For the final paper, you will remove this guard once the model 
+        # is fully trained on realistic traffic patterns.
+        if action == 1 and obs[4] > 0.5: 
             self.app.logger.info(f"🧠 [AI DECISION] SHUFFLE | Obs: {np.round(obs, 2)}")
             self.step()
             self.last_shuffle_time = time.time()
         else:
             # HOLD - Do nothing, save network overhead
-            # We log this less frequently to avoid spamming the console
             pass 
 
     def _heuristic_step(self):
@@ -118,27 +137,19 @@ class MTDEngine:
             self.last_shuffle_time = time.time()
 
     def _get_live_obs(self):
-        """Builds the exact same State Vector used during training."""
-        # 1. is_under_attack
-        state = self.app.threat_detector.get_state()
-        is_under_attack = float(state.get('is_under_attack', 0))
+        """Builds the exact same 7D State Vector used during training."""
+        # 1-5: Threat metrics
+        threat_state = self.app.threat_detector.get_state()
         
-        # 2. scan_intensity
-        max_targets = 0
-        for stats in self.app.threat_detector.arp_stats.values():
-            if len(stats['targets']) > max_targets:
-                max_targets = len(stats['targets'])
-        scan_intensity = min(max_targets / 20.0, 1.0)
-        
-        # 3. time_since_last_shuffle
+        # 6: Time since last shuffle
         time_since = time.time() - self.last_shuffle_time
         time_norm = min(time_since / self.max_shuffle_interval, 1.0)
         
-        # 4. active_connections
-        active_conns = len(self.app.topology.host_table) / 10.0 
-        active_conns = min(active_conns, 1.0)
+        # 7: Active flows (QoS Cost)
+        active_flows = getattr(self.app.flow_manager, 'active_flow_count', 0)
+        active_flows_norm = min(active_flows / 100.0, 1.0)
         
-        return np.array([is_under_attack, scan_intensity, time_norm, active_conns], dtype=np.float32)
+        return np.append(threat_state, [time_norm, active_flows_norm]).astype(np.float32)
 
     def step(self, action=None):
         """Executes the actual network shuffle."""

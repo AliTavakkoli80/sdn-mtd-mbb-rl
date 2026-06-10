@@ -97,3 +97,8 @@ class MTDMovingTargetDefense(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
         self.packet_handler.packet_in_handler(ev)    
+
+    @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
+    def flow_removed_handler(self, ev):
+        """Tracks active flows for the RL agent's QoS cost metric with ZERO polling overhead."""
+        self.flow_manager.active_flow_count = max(0, self.flow_manager.active_flow_count - 1)    

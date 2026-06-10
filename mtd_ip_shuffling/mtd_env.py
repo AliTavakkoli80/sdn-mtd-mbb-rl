@@ -5,8 +5,8 @@ import time
 
 class MTDEnvironment(gym.Env):
     """
-    Custom Gymnasium Environment for MTD IP Shuffling.
-    Wraps the Ryu SDN Controller to allow DRL agents to interact with the network.
+    Q1-Grade Cost-Aware MTD Environment.
+    The agent learns to balance Security (disrupting scans) vs. QoS (preserving active TCP flows).
     """
     metadata = {"render_modes": ["human"], "render_fps": 1}
 
@@ -18,91 +18,66 @@ class MTDEnvironment(gym.Env):
         # Action Space: 0 = HOLD, 1 = SHUFFLE
         self.action_space = spaces.Discrete(2)
         
-        # Observation Space: [is_under_attack, scan_intensity, time_since_shuffle, active_connections]
-        # All normalized between 0.0 and 1.0
-        self.observation_space = spaces.Box(
-            low=0.0, 
-            high=1.0, 
-            shape=(4,), 
-            dtype=np.float32
-        )
+        # 🌟 Q1 UPGRADE: 7D Observation Space
+        # [ent_ip, ent_port, ewma_rate, cv_reg, threat_flag, time_since_shuffle, active_flows]
+        self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(7,), dtype=np.float32)
         
         self.last_shuffle_time = time.time()
-        self.max_shuffle_interval = 300.0 # Normal interval for normalization
-        
+        self.max_shuffle_interval = 60.0 # Normalization factor for time
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.last_shuffle_time = time.time()
-        obs = self._get_obs()
-        info = {}
-        return obs, info
+        return self._get_obs(), {}
 
     def step(self, action):
-        """
-        The core RL loop: Take action -> Observe Network -> Calculate Reward
-        """
-        # 1. Execute Action
         if action == 1: # SHUFFLE
-            self.app.mtd_engine.step() # Trigger immediate shuffle
+            self.app.mtd_engine.step()
             self.last_shuffle_time = time.time()
             
-        # 2. Get next state
         obs = self._get_obs()
+        reward = self._calculate_reward(action, obs)
         
-        # 3. Calculate Reward based on the outcome
-        reward = self._calculate_reward(action)
-        
-        # 4. Check if done (MTD is a continuous task, so we rarely terminate)
-        terminated = False
-        truncated = False
-        
-        info = {"action_taken": action, "reward": reward}
-        
-        if self.render_mode == "human":
-            self._render_human(action, reward, obs)
-            
-        return obs, reward, terminated, truncated, info
+        return obs, reward, False, False, {"action": action}
 
     def _get_obs(self):
-        # 1. is_under_attack (Binary 0.0 or 1.0)
-        state = self.app.threat_detector.get_state()
-        is_under_attack = float(state.get('is_under_attack', 0))
+        # 1-5: Threat metrics from the new Q1 detector
+        threat_state = self.app.threat_detector.get_state() 
         
-        # 2. scan_intensity (Normalized 0.0 to 1.0)
-        max_targets = 0
-        for stats in self.app.threat_detector.arp_stats.values():
-            if len(stats['targets']) > max_targets:
-                max_targets = len(stats['targets'])
-        scan_intensity = min(max_targets / 20.0, 1.0) # Max 20 targets = 1.0 intensity
-        
-        # 3. time_since_last_shuffle (Normalized 0.0 to 1.0)
+        # 6: Time since last shuffle (normalized)
         time_since = time.time() - self.last_shuffle_time
         time_norm = min(time_since / self.max_shuffle_interval, 1.0)
         
-        # 4. active_connections (Normalized 0.0 to 1.0)
-        # Proxy: Number of discovered protected hosts / 10
-        active_conns = len(self.app.topology.host_table) / 10.0 
-        active_conns = min(active_conns, 1.0)
+        # 7: Active flows (The QoS Cost Metric)
+        active_flows = getattr(self.app.flow_manager, 'active_flow_count', 0)
+        active_flows_norm = min(active_flows / 100.0, 1.0) # Assume 100 flows = max load
         
-        return np.array([is_under_attack, scan_intensity, time_norm, active_conns], dtype=np.float32)
+        return np.append(threat_state, [time_norm, active_flows_norm]).astype(np.float32)
 
-    def _calculate_reward(self, action):
-        is_under_attack = self.app.threat_detector.get_state().get('is_under_attack', False)
+    def _calculate_reward(self, action, obs):
+        """
+        Multi-Objective Reward Function: Balances Security vs. QoS.
+        """
+        threat_flag = obs[4] > 0.5
+        active_flows = obs[6] # The cost metric (0.0 to 1.0)
         
-        if action == 0: # HOLD
-            if is_under_attack:
-                return -10.0 # Heavy penalty: Failed to defend during attack
+        if action == 1: # SHUFFLE
+            if threat_flag:
+                return 10.0  # Great: Defended the network during an attack
             else:
-                return 1.0   # Small reward: Maintained stability, saved overhead
-        elif action == 1: # SHUFFLE
-            if is_under_attack:
-                return 10.0  # Heavy reward: Successfully disrupted attacker
+                # 🌟 Q1 UPGRADE: Penalize shuffling, scaled by how much traffic we are disrupting!
+                return -2.0 - (active_flows * 8.0) 
+                
+        elif action == 0: # HOLD
+            if threat_flag:
+                return -10.0 # Bad: Left network vulnerable during an attack
             else:
-                return -5.0  # Medium penalty: Unnecessary shuffle (wasted resources)
+                # 🌟 Q1 UPGRADE: Reward for maintaining stability, scaled by how much traffic we are protecting
+                return 1.0 + (active_flows * 2.0) 
                 
         return 0.0
 
     def _render_human(self, action, reward, obs):
         action_str = "HOLD" if action == 0 else "SHUFFLE"
-        attack_str = "YES" if obs[0] > 0.5 else "NO"
-        print(f"[DRL Env] Action: {action_str:7s} | Attack: {attack_str:3s} | Reward: {reward:5.1f} | Obs: {np.round(obs, 2)}")
+        attack_str = "YES" if obs[4] > 0.5 else "NO"
+        print(f"[DRL Env] Action: {action_str:7s} | Attack: {attack_str:3s} | Flows: {obs[6]:.2f} | Reward: {reward:5.1f}")

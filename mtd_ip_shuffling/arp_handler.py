@@ -11,6 +11,7 @@ class ARPHandler:
         self.app.topology.register_host(datapath.id, in_port, arp_pkt.src_ip, arp_pkt.src_mac)
 
         if arp_pkt.opcode == arp.ARP_REQUEST:
+            # 🌟 Q1 UPGRADE: Feed ARP requests to the unified threat detector for L2 Sweep Detection
             self.app.threat_detector.process_arp_request(arp_pkt.src_ip, arp_pkt.dst_ip)
             self._handle_request(datapath, in_port, pkt, eth, arp_pkt, buffer_id)
         else:

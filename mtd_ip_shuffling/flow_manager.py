@@ -4,25 +4,32 @@ from . import constants as const
 class FlowManager:
     def __init__(self, app):
         self.app = app
+        self.active_flow_count = 0 # 🌟 Q1 UPGRADE: Track active flows for RL cost metric
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None,
                  idle_timeout=0, hard_timeout=0, table_id=0):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        
+        # 🌟 Q1 UPGRADE: Request flow removal notifications to track active flows accurately
+        flags = ofproto.OFPFF_SEND_FLOW_REM 
+        
         if buffer_id and buffer_id != ofproto.OFP_NO_BUFFER:
             mod = parser.OFPFlowMod(
                 datapath=datapath, buffer_id=buffer_id, priority=priority,
                 match=match, instructions=inst, table_id=table_id,
-                idle_timeout=idle_timeout, hard_timeout=hard_timeout)
+                idle_timeout=idle_timeout, hard_timeout=hard_timeout, flags=flags)
         else:
             mod = parser.OFPFlowMod(
                 datapath=datapath, priority=priority, match=match,
                 instructions=inst, table_id=table_id,
-                idle_timeout=idle_timeout, hard_timeout=hard_timeout)
+                idle_timeout=idle_timeout, hard_timeout=hard_timeout, flags=flags)
+                
         datapath.send_msg(mod)
+        self.active_flow_count += 1 # Increment counter
         self.app.logger.debug(f"[flow] installed on S{datapath.id}: prio={priority} match={match}")
-
+       
     def install_table_miss(self, datapath):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
