@@ -2,6 +2,7 @@ import random
 import time
 import os
 import numpy as np
+import ipaddress # 🌟 Added for dynamic subnet calculation
 from ryu.lib import hub
 from . import constants as const
 
@@ -21,7 +22,8 @@ class MTDEngine:
         self.app = app
         self.real_ips = list(app.real_to_virtual.keys())
         
-        self.virtual_pool = [f"10.0.100.{i}" for i in range(10, 60)]
+        # 🌟 DYNAMIC POOL GENERATION: Calculates the subnet based on real IPs
+        self.virtual_pool = self._generate_virtual_pool()
         
         self.normal_interval = normal_interval
         self.attack_interval = attack_interval
@@ -55,6 +57,50 @@ class MTDEngine:
             f"[MTD Engine] Initialized | Normal: {normal_interval}s | Attack: {attack_interval}s | AI: {self.use_ai}"
         )
 
+    def _generate_virtual_pool(self):
+        """
+        🌟 Dynamically generates a pool of virtual IPs based on the subnet of the real IPs.
+        It finds the smallest common network that contains all real IPs, ensuring the 
+        virtual pool stays in the same local subnet for smoother ARP/L2 handling.
+        """
+        if not self.real_ips:
+            self.app.logger.warning("[MTD Engine] No real IPs found. Virtual pool is empty.")
+            return []
+            
+        try:
+            # 1. Calculate the common subnet for all real IPs using bitwise XOR
+            ip_ints = [int(ipaddress.IPv4Address(ip)) for ip in self.real_ips]
+            xor_sum = 0
+            for i in range(1, len(ip_ints)):
+                xor_sum |= (ip_ints[0] ^ ip_ints[i])
+                
+            if xor_sum == 0:
+                prefix_len = 32
+            else:
+                prefix_len = 32 - xor_sum.bit_length()
+                
+            # 2. Cap the prefix length at /24 to ensure a sufficiently large pool (254 IPs)
+            # If the hosts are on different /24 subnets, it will dynamically expand to cover them
+            prefix_len = min(prefix_len, 24)
+            
+            # 3. Create the network object
+            network = ipaddress.IPv4Network(f"{self.real_ips[0]}/{prefix_len}", strict=False)
+            
+            # 4. Build the pool, excluding the actual real IPs
+            pool = []
+            for ip in network.hosts(): # .hosts() automatically excludes network/broadcast addresses
+                ip_str = str(ip)
+                if ip_str not in self.real_ips:
+                    pool.append(ip_str)
+                    
+            self.app.logger.info(f"[MTD Engine] 🌐 Dynamically generated virtual pool: {network} ({len(pool)} available IPs)")
+            return pool
+            
+        except Exception as e:
+            self.app.logger.error(f"[MTD Engine] Failed to generate virtual pool dynamically: {e}")
+            # Fallback to a default pool if something goes wrong
+            return [f"10.0.100.{i}" for i in range(10, 60)]
+
     def start(self):
         """Starts the adaptive shuffling loop."""
         hub.spawn(self._adaptive_shuffle_loop)
@@ -77,23 +123,6 @@ class MTDEngine:
                     if state.get('is_under_attack', False) != self.is_accelerated:
                         break
 
-    # def _ai_inference_step(self):
-    #     """Queries the live network state and asks the AI what to do."""
-    #     obs = self._get_live_obs()
-        
-    #     # deterministic=True ensures the AI picks the absolute best action 
-    #     # without random exploration (which is only for training).
-    #     action, _states = self.model.predict(obs, deterministic=True)
-        
-    #     if action == 1: # SHUFFLE
-    #         self.app.logger.info(f"🧠 [AI DECISION] SHUFFLE | Obs: {np.round(obs, 2)}")
-    #         self.step()
-    #         self.last_shuffle_time = time.time()
-    #     else:
-    #         # HOLD - Do nothing, save network overhead
-    #         # We log this less frequently to avoid spamming the console
-    #         pass 
-
     def _ai_inference_step(self):
         """Queries the live network state and asks the AI what to do."""
         obs = self._get_live_obs()
@@ -103,8 +132,6 @@ class MTDEngine:
         # 🛡️ SAFETY GUARD: The PPO model is currently undertrained and may output 
         # random actions due to the Sim2Real gap. We force it to only shuffle if 
         # the threat detector actually confirms an attack (obs[4] is the threat_flag).
-        # NOTE: For the final paper, you will remove this guard once the model 
-        # is fully trained on realistic traffic patterns.
         if action == 1 and obs[4] > 0.5: 
             self.app.logger.info(f"🧠 [AI DECISION] SHUFFLE | Obs: {np.round(obs, 2)}")
             self.step()
