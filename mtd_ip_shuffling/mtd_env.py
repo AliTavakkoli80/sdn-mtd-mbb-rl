@@ -16,10 +16,10 @@ class MTDEnvironment(gym.Env):
         self.app = app
         self.render_mode = render_mode
         
-        # Action Space: 0 = HOLD, 1 = SHUFFLE
-        self.action_space = spaces.Discrete(2)
+        # 3 Actions -> 0: HOLD, 1: SHUFFLE_GLOBAL, 2: SHUFFLE_TARGETED
+        self.action_space = spaces.Discrete(3)
         
-        # 🌟 Q1 UPGRADE: 7D Observation Space
+        # 7D Observation Space
         # [ent_ip, ent_port, ewma_rate, cv_reg, threat_flag, time_since_shuffle, active_flows]
         self.observation_space = spaces.Box(low=0.0, high=1.0, shape=(7,), dtype=np.float32)
         
@@ -55,30 +55,34 @@ class MTDEnvironment(gym.Env):
         
         return np.append(threat_state, [time_norm, active_flows_norm]).astype(np.float32)
 
-     def _calculate_reward(self, action, obs):
+    def _calculate_reward(self, action, obs):
         threat_flag = obs[4] > 0.5
-        active_flows = obs[6] # 0.0 to 1.0
+        active_flows = obs[6] 
         time_norm = obs[5]
         
-        if action == 1: # SHUFFLE
+        if action == 0: # HOLD
+            if threat_flag: return -15.0
+            staleness_penalty = time_norm * 6.0
+            stability_reward = 1.0 + (2.0 * math.log1p(active_flows * 10))
+            return stability_reward - staleness_penalty
+            
+        elif action == 1: # SHUFFLE GLOBAL (High QoS Penalty)
             if threat_flag:
+                return 10.0 # Good security, but high collateral damage
+            time_bonus = time_norm * 6.0
+            # EXPONENTIAL PENALTY: Disrupts ALL flows in the network
+            qos_penalty = 2.0 * (math.exp(3.0 * active_flows) - 1)
+            return -qos_penalty + time_bonus
+
+        elif action == 2: # SHUFFLE TARGETED (Low QoS Penalty) 
+            if threat_flag:
+                # MASSIVE REWARD: Disrupts attacker with ZERO collateral damage to other hosts!
                 return 15.0 
-            else:
-                time_bonus = time_norm * 6.0 
-                # EXPONENTIAL PENALTY: Models TCP Global Synchronization
-                # Breaking a few flows is bad, breaking many flows collapses the network.
-                qos_penalty = 2.0 * (math.exp(3.0 * active_flows) - 1)
-                return -qos_penalty + time_bonus
-                
-        elif action == 0: # HOLD
-            if threat_flag:
-                return -15.0 
-            else:
-                staleness_penalty = time_norm * 6.0
-                # Reward scales logarithmically with flow count (diminishing returns)
-                stability_reward = 1.0 + (2.0 * math.log1p(active_flows * 10))
-                return stability_reward - staleness_penalty
-                
+            time_bonus = time_norm * 4.0 
+            # LINEAR PENALTY: Only disrupts a tiny fraction of flows (assume ~10% of network)
+            qos_penalty = 0.2 * (active_flows * 2.0) 
+            return -qos_penalty + time_bonus
+            
         return 0.0
 
     def _render_human(self, action, reward, obs):

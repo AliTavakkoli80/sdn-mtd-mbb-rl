@@ -140,3 +140,20 @@ class ThreatDetector:
         return np.array([
             max_ent_ip, max_ent_port, max_rate, max_cv, float(self.is_under_attack)
         ], dtype=np.float32)
+
+    def get_scanned_targets(self):
+        """
+        Returns a list of Virtual IPs currently being targeted by the most aggressive scanner.
+        """
+        max_score = 0.0
+        top_targets = []
+        
+        for src_ip, data in self.sources.items():
+            score = self._compute_threat_score(data)
+            # Only return targets if there's an actual, significant threat
+            if score > 0.4 and score > max_score: 
+                max_score = score
+                # The attacker scans the Virtual IPs, so dst_ips contains the targeted VIPs
+                top_targets = list(data['dst_ips'])
+                
+        return top_targets    

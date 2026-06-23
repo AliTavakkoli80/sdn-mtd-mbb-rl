@@ -124,21 +124,16 @@ class MTDEngine:
                         break
 
     def _ai_inference_step(self):
-        """Queries the live network state and asks the AI what to do."""
         obs = self._get_live_obs()
-        
         action, _states = self.model.predict(obs, deterministic=True)
         
-        # SAFETY GUARD: The PPO model is currently undertrained and may output 
-        # random actions due to the Sim2Real gap. We force it to only shuffle if 
-        # the threat detector actually confirms an attack (obs[4] is the threat_flag).
-        if action == 1 and obs[4] > 0.5: 
-            self.app.logger.info(f"🧠 [AI DECISION] SHUFFLE | Obs: {np.round(obs, 2)}")
-            self.step()
+        if action > 0: # Action 1 (Global) or Action 2 (Targeted)
+            action_name = "GLOBAL" if action == 1 else "TARGETED"
+            self.app.logger.info(f"🧠 [AI DECISION] SHUFFLE ({action_name}) | Obs: {np.round(obs, 2)}")
+            
+            # Pass the action to the step method!
+            self.step(action=action) 
             self.last_shuffle_time = time.time()
-        else:
-            # HOLD - Do nothing, save network overhead
-            pass 
 
     def _heuristic_step(self):
         """The original hardcoded logic (Fallback)."""
@@ -178,11 +173,41 @@ class MTDEngine:
         
         return np.append(threat_state, [time_norm, active_flows_norm]).astype(np.float32)
 
-    def step(self, action=None):
-        """Executes the actual network shuffle."""
-        self.app.logger.info("🎲 [MTD] Executing IP Shuffle...")
-        new_mapping = self._generate_random_mapping()
+    def step(self, action=1):
+        """Executes the network shuffle based on the AI's chosen action."""
+        if action == 2:
+            self.app.logger.info("🎯 [MTD] Executing TARGETED IP Shuffle...")
+            new_mapping = self._generate_targeted_mapping()
+        else:
+            self.app.logger.info("🎲 [MTD] Executing GLOBAL IP Shuffle...")
+            new_mapping = self._generate_random_mapping()
+            
         self.apply_mapping(new_mapping)
+
+    def _generate_targeted_mapping(self):
+        """Generates a new mapping, but ONLY changes IPs that are currently being scanned."""
+        targets = self.app.threat_detector.get_scanned_targets()
+        new_mapping = self.current_mapping.copy() # Start with current mappings
+        
+        # Find which Real IPs correspond to the targeted Virtual IPs
+        targeted_real_ips = [real_ip for real_ip, virt_ip in new_mapping.items() if virt_ip in targets]
+                
+        if not targeted_real_ips:
+            # Fallback to global if we can't find specific targets
+            return self._generate_random_mapping()
+
+        # Get available IPs from the pool (excluding currently used ones)
+        used_vips = set(new_mapping.values())
+        available = [ip for ip in self.virtual_pool if ip not in used_vips]
+        random.shuffle(available)
+        
+        # Only shuffle the targeted Real IPs
+        for real_ip in targeted_real_ips:
+            if available:
+                new_mapping[real_ip] = available.pop()
+                
+        self.app.logger.info(f"🎯 [MTD] Targeted shuffle applied to {len(targeted_real_ips)} hosts.")
+        return new_mapping    
         
     def _generate_random_mapping(self):
         available = self.virtual_pool.copy()
