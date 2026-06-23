@@ -4,7 +4,11 @@ from . import constants as const
 class FlowManager:
     def __init__(self, app):
         self.app = app
-        self.active_flow_count = 0 # 🌟 Q1 UPGRADE: Track active flows for RL cost metric
+        self.active_flow_count = 0
+        
+        # FIX: Add this line to track active sessions for Make-Before-Break
+        # Key: (src_real_ip, dst_real_ip) -> Value: (src_virt_ip, dst_virt_ip)
+        self.active_sessions = {} 
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None,
                  idle_timeout=0, hard_timeout=0, table_id=0):
@@ -12,7 +16,7 @@ class FlowManager:
         parser = datapath.ofproto_parser
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         
-        # 🌟 Q1 UPGRADE: Request flow removal notifications to track active flows accurately
+        # Request flow removal notifications to track active flows accurately
         flags = ofproto.OFPFF_SEND_FLOW_REM 
         
         if buffer_id and buffer_id != ofproto.OFP_NO_BUFFER:
@@ -33,11 +37,26 @@ class FlowManager:
     def install_table_miss(self, datapath):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        
+        # TABLE 0 (ACTIVE) MISS -> Send to TABLE 1 (GRACE)
+        match = parser.OFPMatch()
+        inst = [parser.OFPInstructionGotoTable(const.TABLE_GRACE)]
+        mod = parser.OFPFlowMod(
+            datapath=datapath, priority=const.PRIORITY_TABLE_MISS,
+            match=match, instructions=inst, table_id=const.TABLE_ACTIVE)
+        datapath.send_msg(mod)
+
+        # TABLE 1 (GRACE) MISS -> Send to Controller
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
-        self.add_flow(datapath, const.PRIORITY_TABLE_MISS, match, actions)
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        mod = parser.OFPFlowMod(
+            datapath=datapath, priority=const.PRIORITY_TABLE_MISS,
+            match=match, instructions=inst, table_id=const.TABLE_GRACE)
+        datapath.send_msg(mod)
 
-    def install_translation_flows(self, ingress_dp, in_port, src_ip, virtual_dst, real_dst):
+    def install_translation_flows(self, ingress_dp, in_port, src_ip, virtual_dst, real_dst, 
+                                  table_id=const.TABLE_ACTIVE, hard_timeout=0):
         log = self.app.logger
         if real_dst not in self.app.topology.host_table:
             log.error(f"[flow] Destination {real_dst} unknown - abort")
@@ -47,6 +66,10 @@ class FlowManager:
         egress_dpid = dst_info['dpid']
         egress_port = dst_info['port']
         virtual_src = self.app.real_to_virtual.get(src_ip, src_ip)
+        
+        # Track this specific session for the Grace Period
+        self.active_sessions[(src_ip, real_dst)] = (virtual_src, virtual_dst)
+        
         parser = ingress_dp.ofproto_parser
         ofproto = ingress_dp.ofproto
 
@@ -56,7 +79,8 @@ class FlowManager:
             actions = [parser.OFPActionSetField(ipv4_dst=real_dst),
                        parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
             self.add_flow(ingress_dp, const.PRIORITY_TRANSLATION, match, actions,
-                          idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT)
+                          idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
+                          hard_timeout=hard_timeout, table_id=table_id)
 
         # Egress (if different): real→virtual + direct output
         if egress_dpid != ingress_dp.id:
@@ -66,14 +90,16 @@ class FlowManager:
                 actions = [parser.OFPActionSetField(ipv4_src=virtual_src),
                            parser.OFPActionOutput(egress_port)]
                 self.add_flow(egress_dp, const.PRIORITY_TRANSLATION, match, actions,
-                              idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT)
+                              idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
+                              hard_timeout=hard_timeout, table_id=table_id)
 
                 # Reverse path: from egress to ingress
                 match_rev = parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_dst=virtual_src)
                 actions_rev = [parser.OFPActionSetField(ipv4_dst=src_ip),
                                parser.OFPActionOutput(ofproto.OFPP_NORMAL)]
                 self.add_flow(egress_dp, const.PRIORITY_TRANSLATION, match_rev, actions_rev,
-                              idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT)
+                              idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
+                              hard_timeout=hard_timeout, table_id=table_id)
 
         # Reverse path at ingress: from dest to source
         if ingress_dp.id in self.app.topology.access_ports:
@@ -81,9 +107,10 @@ class FlowManager:
             actions_rev_src = [parser.OFPActionSetField(ipv4_src=virtual_dst),
                                parser.OFPActionOutput(in_port)]
             self.add_flow(ingress_dp, const.PRIORITY_TRANSLATION, match_rev_src, actions_rev_src,
-                          idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT)
+                          idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
+                          hard_timeout=hard_timeout, table_id=table_id)
 
-        log.info("[flow] ✅ Translation flows installed")
+        log.info(f"[flow] ✅ Translation flows installed in Table {table_id}")
         return True
 
     def install_normal_flow(self, datapath, src_ip, dst_ip, in_port, buffer_id, data):
@@ -104,20 +131,19 @@ class FlowManager:
         self.app.logger.debug(f"[normal] flow for {src_ip}→{dst_ip}")
 
     def flush_translation_flows(self, datapath):
-        """Deletes all flows with PRIORITY_TRANSLATION on a specific datapath."""
+        """Deletes all flows ONLY in the ACTIVE table (Table 0)."""
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         
-        # Match any IPv4 packet (eth_type=0x0800) to target our translation flows
         match = parser.OFPMatch(eth_type=const.ETH_TYPE_IP)
-        
         mod = parser.OFPFlowMod(
             datapath=datapath,
             command=ofproto.OFPFC_DELETE,
             out_group=ofproto.OFPG_ANY,
             out_port=ofproto.OFPP_ANY,
             match=match,
-            priority=const.PRIORITY_TRANSLATION
+            priority=const.PRIORITY_TRANSLATION,
+            table_id=const.TABLE_ACTIVE # CRITICAL: Only delete from Table 0!
         )
         datapath.send_msg(mod)
-        self.app.logger.debug(f"[flow] 🗑️ Flushed translation flows on S{datapath.id}")    
+        self.app.logger.debug(f"[flow] 🗑️ Flushed ACTIVE flows on S{datapath.id}")    

@@ -1,3 +1,7 @@
+Here is the fully updated `README.md`. It accurately reflects all the massive architectural upgrades we've built (Information-Theoretic Detection, Exponential QoS Rewards, and Stateful Make-Before-Break Table Chaining) while explicitly leaving out the Targeted IP Shuffling feature, as that is our next step.
+
+***
+
 # Moving Target Defense (MTD) IP Shuffling for SDN
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python)](https://www.python.org/)
@@ -5,7 +9,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![SDN](https://img.shields.io/badge/SDN-OpenFlow_1.3-green)](https://www.opennetworking.org/)
 
-A transparent, **Cost-Aware Moving Target Defense (MTD)** framework for Software-Defined Networks. It dynamically shuffles IP addresses to protect critical servers from L3/L4 reconnaissance and targeted attacks. Clients interact only with virtual IPs while the controller transparently translates traffic to real server IPs at network edges. The shuffling frequency is governed by a **Deep Reinforcement Learning (PPO)** agent that balances security gains against Quality of Service (QoS) degradation.
+A transparent, **Stateful Moving Target Defense (MTD)** framework for Software-Defined Networks. It dynamically shuffles IP addresses to protect critical servers from L2/L3/L4 reconnaissance and targeted attacks. Clients interact only with virtual IPs while the controller transparently translates traffic to real server IPs at network edges. The shuffling frequency is governed by a **Cost-Aware Deep Reinforcement Learning (PPO)** agent that balances security gains against Quality of Service (QoS) degradation, utilizing **OpenFlow 1.3 Table Chaining** to ensure zero-downtime for active TCP sessions.
 
 ## 🌐 Architecture Overview
 
@@ -13,16 +17,17 @@ A transparent, **Cost-Aware Moving Target Defense (MTD)** framework for Software
 +----------------+     +-------------------------------------+     +------------------+
 |   Client       |     |          SDN Network                |     |  Protected Host  |
 |                |     |                                     |     |                  |
-| 10.0.0.5       |     |  +--------+     +--------+          |     | Real IP: 10.0.0.1|
-|                |---->|->| Edge   |---->| Core   |----+     |---->| Virtual:10.0.0.11|
+| 10.0.0.1       |     |  +--------+     +--------+          |     | Real IP: 10.0.0.2|
+|                |---->|->| Edge   |---->| Core   |----+     |---->| Virtual:10.0.0.12|
 | Sees ONLY      | ARP |  | Switch |     | Switch |    | DNS | UDP |                  |
-| 10.0.0.11      |<----|<-| (S1)   |<----| (S2)   |<---+     |<----|                  |
+| 10.0.0.12      |<----|<-| (S1)   |<----| (S2)   |<---+     |<----|                  |
 +----------------+     |  +--------+     +--------+          |     +------------------+
                        |        ↑                            |
                        |        | Ryu Controller             |
                        |        | • DNS Payload Patching     |
-                       |        | • L3/L4 Threat Detection   |
+                       |        | • Info-Theoretic Detection |
                        |        | • PPO RL Inference Engine  |
+                       |        | • Make-Before-Break Tables |
                        +-------------------------------------+
 ```
 
@@ -30,13 +35,12 @@ A transparent, **Cost-Aware Moving Target Defense (MTD)** framework for Software
 
 ## ✨ Key Features
 
-- **Transparent IP Translation**: Real IPs hidden behind virtual IPs; clients never see actual server addresses.
-- **Bulletproof DNS Payload Patching**: Surgically modifies raw DNS bytes and recalculates RFC 1071 checksums to ensure strict Linux kernels (like Alpine/musl) accept translated DNS responses without dropping them.
-- **Information-Theoretic L3/L4 Threat Detection**: Monitors IPv4/TCP/UDP traffic using **Shannon Entropy**, **EWMA Rate Smoothing**, and **Inter-Arrival Time (IAT) Fingerprinting** to detect Nmap SYN scans and IP sweeps in real-time.
-- **Cost-Aware Deep Reinforcement Learning**: A Proximal Policy Optimization (PPO) agent decides *when* to shuffle IPs, penalizing unnecessary shuffles that would break active TCP flows (QoS preservation).
-- **Edge-Only Translation**: IP translation occurs ONLY at host-facing edge switches.
-- **Bidirectional Flow Handling**: Installs flows for both client→server and server→client paths with proper translation.
-- **Topology-Aware**: Discovers network topology and accurately identifies edge vs. core switches using LLDP.
+- **Stateful Zero-Downtime MTD (Make-Before-Break)**: Utilizes OpenFlow 1.3 Table Chaining. When a shuffle occurs, old mappings are moved to a "Grace Table" (Table 1) with a 15-second hard timeout, while new mappings are installed in the "Active Table" (Table 0). This guarantees active TCP sessions survive the IP change without triggering TCP Global Synchronization.
+- **Information-Theoretic L2/L3/L4 Threat Detection**: Monitors traffic using **Shannon Entropy**, **EWMA Rate Smoothing**, and **Inter-Arrival Time (IAT) Coefficient of Variation** to mathematically fingerprint automated scanners (like Nmap/arping) vs. legitimate human traffic.
+- **Cost-Aware Deep Reinforcement Learning**: A Proximal Policy Optimization (PPO) agent decides *when* to shuffle IPs. It uses an **Exponential TCP Collapse Penalty** to avoid shuffling during high network load, and a **Staleness Penalty** to force proactive shuffling before attackers can map the network.
+- **Transparent IP Translation & Bulletproof DNS**: Real IPs hidden behind virtual IPs. Surgically modifies raw DNS bytes and recalculates RFC 1071 checksums to ensure strict Linux kernels accept translated DNS responses.
+- **Zero-Overhead Flow Tracking**: Tracks active OpenFlow flows via asynchronous `OFPFF_SEND_FLOW_REM` events to measure real-time QoS cost without polling the switches.
+- **Topology-Aware Edge Translation**: Discovers network topology via LLDP and accurately identifies edge vs. core switches, ensuring IP translation only happens at the network perimeter.
 
 ---
 
@@ -44,23 +48,22 @@ A transparent, **Cost-Aware Moving Target Defense (MTD)** framework for Software
 
 This project features a dual-mode MTD engine: **Heuristic Fallback** and **AI-Driven Inference**.
 
-### 1. Training the PPO Agent
-The RL agent is trained in a simulated Gymnasium environment (`mtd_env.py`) using Stable-Baselines3. The agent learns a policy $\pi(a|s)$ that maps the network state $s$ (threat intensity, active flows, time since last shuffle) to an action $a \in \{HOLD, SHUFFLE\}$.
+### 1. The 7D State Space & Multi-Objective Reward
+The RL agent observes a 7-dimensional state vector: `[IP_Entropy, Port_Entropy, EWMA_Rate, IAT_CV, Threat_Flag, Time_Since_Shuffle, Active_Flows]`. 
 
-To train the agent from scratch:
+The reward function mathematically models the trade-off between Security and QoS:
+* **Exponential QoS Penalty**: Shuffling during high TCP load incurs an exponential penalty $-2.0 \times (e^{3 \cdot f_t} - 1)$ to model TCP Global Synchronization.
+* **Staleness Penalty**: Holding too long incurs a penalty proportional to the time since the last shuffle, forcing the agent to proactively randomize the network.
+
+### 2. Training and Deployment
 ```bash
 # Activate virtual environment
 source venv/bin/activate
 
-# Run the training script (Uses mock objects for standalone training)
+# Train the PPO agent (Generates mtd_ppo_agent.zip)
 python train_agent.py
 ```
-*This will generate `mtd_ppo_agent.zip` in the project root.*
-
-### 2. Deploying AI Inference
-When the Ryu controller starts, `mtd_engine.py` automatically checks for `mtd_ppo_agent.zip`. 
-- **If found**: The controller loads the PPO model and queries it every 2 seconds for rapid, intelligent shuffling decisions.
-- **If not found**: The controller falls back to the hardcoded heuristic logic (shuffling based on simple threshold triggers).
+When the Ryu controller starts, `mtd_engine.py` automatically loads `mtd_ppo_agent.zip`. If found, it queries the AI every 2 seconds for intelligent shuffling decisions. If not found, it falls back to hardcoded heuristic logic.
 
 ---
 
@@ -68,12 +71,11 @@ When the Ryu controller starts, `mtd_engine.py` automatically checks for `mtd_pp
 
 ### Prerequisites
 ```bash
-# System dependencies (Ubuntu/Debian)
 sudo apt update
 sudo apt install -y python3 python3-pip python3-venv openvswitch-switch git
 ```
 
-### Project Setup with Virtual Environment
+### Project Setup
 ```bash
 cd /path/to/mtd-ip-shuffling
 python3 -m venv venv
@@ -87,32 +89,31 @@ pip install -r requirements.txt # Includes: ryu, gymnasium, stable-baselines3, d
 
 ## 🚀 Controller Execution
 
-### Start the Controller
 ```bash
 # Ensure virtual environment is activated!
 source venv/bin/activate
 
-# Start Ryu with topology discovery
-PYTHONPATH=. ryu-manager mtd_ip_shuffling.app ./flowmanager/flowmanager.py --observe-links
+# Start Ryu with topology discovery and log redirection
+PYTHONPATH=. ryu-manager mtd_ip_shuffling.app ./flowmanager/flowmanager.py --observe-links > ryu_controller.log 2>&1
 ```
 
 ---
 
 ## 🌐 GNS3 Deployment Guide
 
-To properly test MTD and Threat Detection, we use **Netshoot** (a lightweight Linux Docker container with full networking tools like `nmap`, `arping`, and `tcpdump`) instead of basic VPCS nodes. We also use a custom **dnsmasq** Docker image configured to handle IPv6 (`AAAA`) queries gracefully.
+To properly test MTD and Threat Detection, we use **Netshoot** (a lightweight Linux Docker container with full networking tools like `nmap`, `arping`, and `tcpdump`) instead of basic VPCS nodes. 
 
 ### 1. Client Configuration (Netshoot Docker Containers)
-In GNS3, drag two **Netshoot** Docker containers into your topology. Go to **Configure > Docker > Start command** and paste the following:
+In GNS3, drag two **Netshoot** Docker containers into your topology. Go to **Configure > Docker > Start command** and paste the following to disable IPv6 (prevents DNS AAAA timeout issues):
 
-**For PC1 (Attacker/Scanner Node):**
+**For PC1 (Attacker/Client Node):**
 ```bash
-sh -c 'ip link set eth0 down ; ip link set dev eth0 address 00:50:79:66:68:00 ; ip addr add 10.0.0.1/8 dev eth0 ; ip link set eth0 up ; sysctl -w net.ipv6.conf.eth0.disable_ipv6=1 ; sysctl -w net.ipv6.conf.all.disable_ipv6=1 ; echo "nameserver 10.0.0.10" > /etc/resolv.conf ; echo "options single-request" >> /etc/resolv.conf ; exec sh'
+sh -c 'ip link set eth0 down ; ip link set dev eth0 address 00:50:79:66:68:00 ; ip addr add 10.0.0.1/8 dev eth0 ; ip link set eth0 up ; sysctl -w net.ipv6.conf.eth0.disable_ipv6=1 ; sysctl -w net.ipv6.conf.all.disable_ipv6=1 ; echo "nameserver 10.0.0.10" > /etc/resolv.conf ; exec sh'
 ```
 
-**For PC2 (Victim Node):**
+**For PC2 (Victim/Server Node):**
 ```bash
-sh -c 'ip link set eth0 down ; ip link set dev eth0 address 00:50:79:66:68:01 ; ip addr add 10.0.0.2/8 dev eth0 ; ip link set eth0 up ; sysctl -w net.ipv6.conf.eth0.disable_ipv6=1 ; sysctl -w net.ipv6.conf.all.disable_ipv6=1 ; echo "nameserver 10.0.0.10" > /etc/resolv.conf ; echo "options single-request" >> /etc/resolv.conf ; exec sh'
+sh -c 'ip link set eth0 down ; ip link set dev eth0 address 00:50:79:66:68:01 ; ip addr add 10.0.0.2/8 dev eth0 ; ip link set eth0 up ; sysctl -w net.ipv6.conf.eth0.disable_ipv6=1 ; sysctl -w net.ipv6.conf.all.disable_ipv6=1 ; echo "nameserver 10.0.0.10" > /etc/resolv.conf ; exec sh'
 ```
 
 ### 2. DNS Server Configuration (Dnsmasq Docker Container)
@@ -129,61 +130,40 @@ sh -c 'printf "interface=eth0\nno-resolv\nlocal=/com/\naddress=/host1.com/10.0.0
 ```bash
 # On PC1 (Netshoot):
 ping host2.com
-# EXPECTED: Resolves to a Virtual IP (e.g., 10.0.100.XX). Ping succeeds.
-# Controller logs will show DNS byte-patching and flow installation.
+# EXPECTED: Resolves to a Virtual IP (e.g., 10.0.0.12). Ping succeeds.
+# Controller logs will show DNS byte-patching and flow installation in Table 0.
 ```
 
-### Test 2: L3/L4 Threat Detection & AI Shuffling
-Simulate an attacker performing an Nmap SYN scan to trigger the Information-Theoretic Threat Detector.
+### Test 2: Stateful Zero-Downtime MTD (The Make-Before-Break Proof)
+This test proves that active TCP sessions survive an IP shuffle without dropping.
+
+**1. Start the server on PC2:**
 ```bash
-# On PC1 (Netshoot), run an Nmap SYN scan across the subnet:
-nmap -sS -p 80 10.0.0.1-50
+iperf3 -s
 ```
-**EXPECTED CONTROLLER LOGS:**
-```text
-🚨 [THREAT] Intelligent scan signature detected from 10.0.0.1 (Score: 0.842)
-🧠 [AI DECISION] SHUFFLE | Obs: [1.0  0.8  0.1  0.0]
-🎲 [MTD] Executing IP Shuffle...
-✅ [MTD] New mapping applied:
-   10.0.0.1 ⇄ 10.0.100.44
-   10.0.0.2 ⇄ 10.0.100.32
+
+**2. Run the client and trigger a sequential attack on PC1:**
+```bash
+# Start a 60-second TCP stream using the domain name
+iperf3 -c host2.com -t 60 -i 2 > /tmp/iperf_results.txt &
+
+# Wait 10 seconds for the stream to stabilize
+sleep 10
+
+# Trigger a sequential ARP sweep to force the AI to shuffle
+echo "--- Triggering Surgical Sequential Sweep ---"
+for i in $(seq 50 70); do arping -c 1 -w 1 10.0.0.$i; done
+
+# Wait for iperf3 to finish and show results
+wait
+cat /tmp/iperf_results.txt
 ```
-*The entropy and IAT metrics detect the automated scanner. The PPO agent observes the high threat score and triggers an immediate shuffle, invalidating the attacker's scan results.*
 
----
-
-## 📊 Research & Experimental Methodology (For Q1 Publication)
-
-To evaluate the framework for academic publication, the following methodology is used to generate the performance graphs:
-
-1. **Testbed Setup**: A Mininet/GNS3 topology with 4 Open vSwitches and 8 hosts.
-2. **Traffic Generation**: 
-   - **Legitimate Traffic**: `iperf3` generates continuous TCP streams between hosts to measure QoS degradation.
-   - **Attack Traffic**: A Python/Scapy script generates L3/L4 SYN sweeps at varying intensities.
-3. **Baselines for Comparison**:
-   - **Static SDN**: No MTD applied.
-   - **Periodic MTD**: Shuffles IPs exactly every 10 seconds.
-   - **Random MTD**: Shuffles IPs based on a Poisson distribution.
-   - **Proposed DRL-MTD**: The PPO agent.
-4. **Key Metrics Evaluated**:
-   - **Reconnaissance Failure Rate**: Percentage of attacker's mapped topology that becomes obsolete.
-   - **TCP Throughput Degradation**: Measured via `iperf3` to prove the RL agent avoids shuffling during heavy TCP flows.
-   - **Control Plane Overhead**: Number of `FLOW_MOD` messages sent by Ryu.
-
----
-
-## 📝 Citation
-
-If you use this framework or its underlying concepts in your research, please cite:
-
-```bibtex
-@mastersthesis{tavakkoli2026dynamic,
-  title={A Dynamic Framework for Intelligent Mitigation of Network Reconnaissance and Scanning using Reinforcement Learning in Software-Defined Networks},
-  author={Tavakkoli, Ali},
-  year={2026},
-  school={University Name}
-}
-```
+**EXPECTED BEHAVIOR:**
+1. The `arping` sweep triggers the Information-Theoretic Threat Detector.
+2. The PPO agent observes the threat and triggers a **SHUFFLE**.
+3. The controller moves the old flows to **Table 1 (Grace)** and installs new flows in **Table 0 (Active)**.
+4. The `iperf3` output will show **continuous high throughput** for 15 seconds after the shuffle, proving the TCP session survived via the Grace Period, before cleanly terminating when the 15s hard timeout expires.
 
 ---
 
@@ -191,25 +171,14 @@ If you use this framework or its underlying concepts in your research, please ci
 
 | Threat Vector | Mitigation Implemented | Limitation |
 |---------------|------------------------|------------|
-| **L3/L4 IP Scanning** | Real IPs never exposed; RL-driven shuffling breaks scan maps | Requires DNS interception |
+| **L2/L3/L4 Scanning** | Real IPs never exposed; RL-driven shuffling breaks scan maps | Requires DNS interception |
 | **Automated Scanners** | IAT Coefficient of Variation fingerprinting detects low-variance tool traffic | N/A |
-| **Flow Table Exhaustion** | Translation flows limited to edge switches + idle timeouts (300s) | Core switches unaffected |
-| **DNS Cache Poisoning** | Controller intercepts ALL DNS responses & patches bytes securely | Only protects DNS passing through controller |
+| **TCP Session Drops** | OpenFlow Table Chaining (Make-Before-Break) preserves active flows | 15s grace period limit |
+| **Flow Table Exhaustion** | Translation flows limited to edge switches + idle timeouts | Core switches unaffected |
 
 > ⚠️ **Critical Warning**: MTD increases attack surface complexity but is **NOT a replacement** for firewalls, IDS/IPS, patching, or other security controls. Use as a defense-in-depth layer only.
 
 ---
 
-## 📜 License
-
-```text
-Copyright 2026 Ali Tavakkoli
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-```
 
 > ⚠️ **Disclaimer**: This project is provided for **educational and research purposes** (Master's Thesis / Q1 Journal Submission). Not recommended for production environments without extensive security hardening.

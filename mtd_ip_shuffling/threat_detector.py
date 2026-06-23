@@ -119,7 +119,7 @@ class ThreatDetector:
             n_ips = len(src['dst_ips'])
             n_ports = len(src['dst_ports'])
             
-            # 🌟 FIX: Match the / 4.0 normalization from _compute_threat_score
+            # Match the / 4.0 normalization from _compute_threat_score
             e_ip = min(math.log2(max(n_ips, 1)) / 4.0, 1.0)
             e_port = min(math.log2(max(n_ports, 1)) / 4.0, 1.0)
             rate = min(src['ewma_rate'] / self.RATE_THRESHOLD, 1.0)

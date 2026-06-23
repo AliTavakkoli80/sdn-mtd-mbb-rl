@@ -1,6 +1,7 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+import math
 import time
 
 class MTDEnvironment(gym.Env):
@@ -54,26 +55,29 @@ class MTDEnvironment(gym.Env):
         
         return np.append(threat_state, [time_norm, active_flows_norm]).astype(np.float32)
 
-    def _calculate_reward(self, action, obs):
-        """
-        Multi-Objective Reward Function: Balances Security vs. QoS.
-        """
+     def _calculate_reward(self, action, obs):
         threat_flag = obs[4] > 0.5
-        active_flows = obs[6] # The cost metric (0.0 to 1.0)
+        active_flows = obs[6] # 0.0 to 1.0
+        time_norm = obs[5]
         
         if action == 1: # SHUFFLE
             if threat_flag:
-                return 10.0  # Great: Defended the network during an attack
+                return 15.0 
             else:
-                # 🌟 Q1 UPGRADE: Penalize shuffling, scaled by how much traffic we are disrupting!
-                return -2.0 - (active_flows * 8.0) 
+                time_bonus = time_norm * 6.0 
+                # EXPONENTIAL PENALTY: Models TCP Global Synchronization
+                # Breaking a few flows is bad, breaking many flows collapses the network.
+                qos_penalty = 2.0 * (math.exp(3.0 * active_flows) - 1)
+                return -qos_penalty + time_bonus
                 
         elif action == 0: # HOLD
             if threat_flag:
-                return -10.0 # Bad: Left network vulnerable during an attack
+                return -15.0 
             else:
-                # 🌟 Q1 UPGRADE: Reward for maintaining stability, scaled by how much traffic we are protecting
-                return 1.0 + (active_flows * 2.0) 
+                staleness_penalty = time_norm * 6.0
+                # Reward scales logarithmically with flow count (diminishing returns)
+                stability_reward = 1.0 + (2.0 * math.log1p(active_flows * 10))
+                return stability_reward - staleness_penalty
                 
         return 0.0
 
