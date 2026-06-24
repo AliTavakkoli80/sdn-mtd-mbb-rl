@@ -5,6 +5,7 @@ import numpy as np
 import ipaddress # 🌟 Added for dynamic subnet calculation
 from ryu.lib import hub
 from . import constants as const
+from . import config
 
 # Import PPO for inference
 try:
@@ -81,16 +82,19 @@ class MTDEngine:
                 
             # 2. Cap the prefix length at /8 to ensure a sufficiently large pool (254 IPs)
             # If the hosts are on different /8 subnets, it will dynamically expand to cover them
-            prefix_len = min(prefix_len, 8)
+            prefix_len = min(prefix_len, 24)
             
             # 3. Create the network object
             network = ipaddress.IPv4Network(f"{self.real_ips[0]}/{prefix_len}", strict=False)
             
-            # 4. Build the pool, excluding the actual real IPs
+            # 4. Build the pool, excluding real IPs AND infrastructure hosts (DNS)
+            excluded_ips = set(self.real_ips)
+            excluded_ips.add(config.DNS_SERVER_IP) # Prevents IP collision with 10.0.0.10
+            
             pool = []
-            for ip in network.hosts(): # .hosts() automatically excludes network/broadcast addresses
+            for ip in network.hosts(): 
                 ip_str = str(ip)
-                if ip_str not in self.real_ips:
+                if ip_str not in excluded_ips:
                     pool.append(ip_str)
                     
             self.app.logger.info(f"[MTD Engine] 🌐 Dynamically generated virtual pool: {network} ({len(pool)} available IPs)")
