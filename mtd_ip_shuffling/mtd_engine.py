@@ -127,11 +127,9 @@ class MTDEngine:
         obs = self._get_live_obs()
         action, _states = self.model.predict(obs, deterministic=True)
         
-        if action > 0: # Action 1 (Global) or Action 2 (Targeted)
+        if action > 0: 
             action_name = "GLOBAL" if action == 1 else "TARGETED"
-            self.app.logger.info(f"🧠 [AI DECISION] SHUFFLE ({action_name}) | Obs: {np.round(obs, 2)}")
-            
-            # Pass the action to the step method!
+            self.app.logger.info(f"🧠 [AI DECISION] SHUFFLE ({action_name}) | Intensity: {obs[4]:.2f} | Flows: {obs[6]:.2f}")
             self.step(action=action) 
             self.last_shuffle_time = time.time()
 
@@ -160,18 +158,21 @@ class MTDEngine:
 
     def _get_live_obs(self):
         """Builds the exact same 7D State Vector used during training."""
-        # 1-5: Threat metrics
         threat_state = self.app.threat_detector.get_state()
         
-        # 6: Time since last shuffle
+        # 🌟 Use continuous intensity instead of binary flag
+        threat_intensity = self.app.threat_detector.get_max_intensity()
+        
         time_since = time.time() - self.last_shuffle_time
         time_norm = min(time_since / self.max_shuffle_interval, 1.0)
         
-        # 7: Active flows (QoS Cost)
         active_flows = getattr(self.app.flow_manager, 'active_flow_count', 0)
         active_flows_norm = min(active_flows / 100.0, 1.0)
         
-        return np.append(threat_state, [time_norm, active_flows_norm]).astype(np.float32)
+        return np.array([
+            threat_state[0], threat_state[1], threat_state[2], threat_state[3],
+            threat_intensity, time_norm, active_flows_norm
+        ], dtype=np.float32)
 
     def step(self, action=1):
         """Executes the network shuffle based on the AI's chosen action."""

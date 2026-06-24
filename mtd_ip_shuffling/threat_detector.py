@@ -157,3 +157,12 @@ class ThreatDetector:
                 top_targets = list(data['dst_ips'])
                 
         return top_targets    
+
+    def get_max_intensity(self):
+        """Returns the continuous threat intensity (0.0 to 1.0) of the most aggressive source."""
+        max_score = 0.0
+        for data in self.sources.values():
+            score = self._compute_threat_score(data)
+            if score > max_score:
+                max_score = score
+        return max_score    
