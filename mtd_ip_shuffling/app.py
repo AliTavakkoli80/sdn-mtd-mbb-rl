@@ -15,11 +15,94 @@ from .arp_handler import ARPHandler
 from .ipv4_handler import IPv4Handler
 from .mtd_engine import MTDEngine
 from .threat_detector import ThreatDetector
+from ryu.app.wsgi import ControllerBase, WSGIApplication, route
+import json
+from webob import Response
+
 
 LOG = setup_logging()
 
+class MTDStateAPI(ControllerBase):
+    """
+    REST API for Sim-to-Real fine-tuning.
+    Exposes the controller's internal state to the RL environment.
+    """
+    
+    def __init__(self, req, link, data, **config):
+        super(MTDStateAPI, self).__init__(req, link, data, **config)
+        self.mtd_app = data['app']
+
+    @route('mtd', '/mtd/state', methods=['GET'])
+    def get_state(self, req, **kwargs):
+        """Returns the 7D observation vector + metadata."""
+        try:
+            threat_state = self.mtd_app.threat_detector.get_state().tolist()
+            intensity = self.mtd_app.threat_detector.get_max_intensity()
+            flows = self.mtd_app.flow_manager.active_flow_count
+            scanned = self.mtd_app.threat_detector.get_scanned_targets()
+            is_attack = bool(self.mtd_app.threat_detector.is_under_attack)
+            
+            response_data = {
+                'threat_state': threat_state,
+                'intensity': float(intensity),
+                'active_flows': int(flows),
+                'scanned_targets': scanned,
+                'is_under_attack': is_attack
+            }
+            
+            # Use .encode('utf-8') to convert string to bytes
+            return Response(
+                content_type='application/json',
+                body=json.dumps(response_data).encode('utf-8')
+            )
+        except Exception as e:
+            return Response(
+                status=500,
+                content_type='application/json',
+                body=json.dumps({'error': str(e)}).encode('utf-8')
+            )
+
+    @route('mtd', '/mtd/action', methods=['POST'])
+    def execute_action(self, req, **kwargs):
+        """Executes an MTD action (GLOBAL=1, TARGETED=2)."""
+        try:
+            data = json.loads(req.body or '{}')
+            action = int(data.get('action', 0))
+            
+            if action == 1:
+                self.mtd_app.mtd_engine.step(action=1)
+                msg = "GLOBAL shuffle executed"
+            elif action == 2:
+                self.mtd_app.mtd_engine.step(action=2)
+                msg = "TARGETED shuffle executed"
+            elif action == 0:
+                msg = "HOLD (no action)"
+            else:
+                return Response(
+                    status=400,
+                    content_type='application/json',
+                    body=json.dumps({'error': 'Invalid action'}).encode('utf-8')
+                )
+            
+            # Use .encode('utf-8') to convert string to bytes
+            return Response(
+                content_type='application/json',
+                body=json.dumps({'status': 'ok', 'message': msg}).encode('utf-8')
+            )
+        except Exception as e:
+            return Response(
+                status=500,
+                content_type='application/json',
+                body=json.dumps({'error': str(e)}).encode('utf-8')
+            )
+
 class MTDMovingTargetDefense(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    
+    # Register WSGI as a context
+    _CONTEXTS = {
+        'wsgi': WSGIApplication
+    }
 
     _EVENTS = [
         event.EventSwitchEnter,
@@ -33,6 +116,10 @@ class MTDMovingTargetDefense(app_manager.RyuApp):
 
     def __init__(self, *args, **kwargs):
         super(MTDMovingTargetDefense, self).__init__(*args, **kwargs)
+        
+        # Register the REST API with the app reference
+        self.wsgi = kwargs['wsgi']
+        self.wsgi.register(MTDStateAPI, {'app': self})
 
         self.dns_ip = config.DNS_SERVER_IP
         self.real_to_virtual = config.REAL_TO_VIRTUAL

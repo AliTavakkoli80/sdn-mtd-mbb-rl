@@ -13,7 +13,7 @@ class ThreatDetector:
         self.alpha = alpha
         self.RATE_THRESHOLD = rate_threshold
         
-        # 🌟 FIX: Lowered threshold to 0.50 to ensure L2 sweeps trigger the alarm
+        # FIX: Lowered threshold to 0.50 to ensure L2 sweeps trigger the alarm
         self.ATTACK_THRESHOLD = 0.50
         self.CLEAR_THRESHOLD = 0.25  # Hysteresis to prevent flapping
         
