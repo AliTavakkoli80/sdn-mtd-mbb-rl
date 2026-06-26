@@ -45,8 +45,8 @@ class ContainernetEnv(gym.Env):
         ryu_api_url="http://127.0.0.1:8080",
         cmd_socket_host="127.0.0.1",
         cmd_socket_port=9999,
-        step_duration=8.0,           # Seconds to wait after each action
-        attack_probability=0.3,      # Probability of launching attack each step
+        step_duration=8.0,
+        attack_probability=0.7,
         render_mode=None
     ):
         super().__init__()
@@ -83,6 +83,40 @@ class ContainernetEnv(gym.Env):
         
         # Verify connectivity
         self._verify_connectivity()
+        
+        # Enable fine-tuning mode in Ryu
+        self._enable_fine_tune_mode()
+    
+    def _enable_fine_tune_mode(self):
+        """Tell Ryu to disable its internal AI loop during fine-tuning."""
+        try:
+            response = requests.post(
+                f"{self.ryu_api_url}/mtd/finetune_mode",
+                json={'enabled': True},
+                timeout=5
+            )
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ {data['message']}")
+            else:
+                print(f"⚠️  Failed to enable fine-tune mode: {response.text}")
+        except Exception as e:
+            print(f"⚠️  Could not enable fine-tune mode: {e}")
+            print("   Ryu's internal AI loop may interfere with fine-tuning!")
+    
+    def close(self):
+        """Clean up resources and disable fine-tuning mode."""
+        print("🔌 Closing ContainernetEnv...")
+        try:
+            # Disable fine-tuning mode so Ryu can resume normal operation
+            requests.post(
+                f"{self.ryu_api_url}/mtd/finetune_mode",
+                json={'enabled': False},
+                timeout=5
+            )
+            print("✅ Fine-tuning mode disabled - Ryu resumed normal operation")
+        except Exception as e:
+            print(f"⚠️  Could not disable fine-tune mode: {e}")
     
     def _verify_connectivity(self):
         """Verify that both Ryu API and command socket are accessible."""

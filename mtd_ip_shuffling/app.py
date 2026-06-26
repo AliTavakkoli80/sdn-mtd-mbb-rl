@@ -32,6 +32,31 @@ class MTDStateAPI(ControllerBase):
         super(MTDStateAPI, self).__init__(req, link, data, **config)
         self.mtd_app = data['app']
 
+    @route('mtd', '/mtd/finetune_mode', methods=['POST'])
+    def set_fine_tune_mode(self, req, **kwargs):
+        """Enable or disable fine-tuning mode."""
+        try:
+            data = json.loads(req.body or '{}')
+            enabled = bool(data.get('enabled', False))
+            
+            self.mtd_app.mtd_engine.set_fine_tune_mode(enabled)
+            
+            mode_str = "ENABLED" if enabled else "DISABLED"
+            return Response(
+                content_type='application/json',
+                body=json.dumps({
+                    'status': 'ok',
+                    'message': f'Fine-tuning mode {mode_str}',
+                    'fine_tune_mode': enabled
+                }).encode('utf-8')
+            )
+        except Exception as e:
+            return Response(
+                status=500,
+                content_type='application/json',
+                body=json.dumps({'error': str(e)}).encode('utf-8')
+            )    
+
     @route('mtd', '/mtd/state', methods=['GET'])
     def get_state(self, req, **kwargs):
         """Returns the 7D observation vector + metadata."""

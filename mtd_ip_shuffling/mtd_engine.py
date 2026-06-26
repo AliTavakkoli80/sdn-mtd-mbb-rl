@@ -19,6 +19,8 @@ class MTDEngine:
     """
     Manages Moving Target Defense IP Shuffling.
     Supports AI-driven decision making via a trained PPO model.
+    
+    🌟 NEW: Fine-tuning mode disables internal AI loop for external control.
     """
     
     def __init__(self, app, normal_interval=300, attack_interval=5):
@@ -39,6 +41,9 @@ class MTDEngine:
         self.last_shuffle_time = time.time()
         self.is_accelerated = False
         
+        # 🌟 NEW: Fine-tuning mode flag
+        self.fine_tune_mode = False
+        
         # AI model initialization
         self.use_ai = False
         self.model = None
@@ -46,8 +51,19 @@ class MTDEngine:
         
         self.app.logger.info(
             f"[MTD Engine] Initialized | Normal: {normal_interval}s | "
-            f"Attack: {attack_interval}s | AI: {self.use_ai}"
+            f"Attack: {attack_interval}s | AI: {self.use_ai} | Fine-tune: {self.fine_tune_mode}"
         )
+
+    def set_fine_tune_mode(self, enabled: bool):
+        """
+        Enable or disable fine-tuning mode.
+        When enabled, the internal AI loop is paused and only external REST API commands are executed.
+        """
+        self.fine_tune_mode = enabled
+        if enabled:
+            self.app.logger.info("🎓 [MTD Engine] Fine-tuning mode ENABLED - Internal AI loop paused")
+        else:
+            self.app.logger.info("✅ [MTD Engine] Fine-tuning mode DISABLED - Internal AI loop resumed")
 
     def _load_ai_model(self):
         """Load the trained PPO model from the runs directory."""
@@ -138,6 +154,11 @@ class MTDEngine:
         self.app.logger.info("[MTD Engine] Control loop started")
         
         while True:
+            # 🌟 NEW: Skip internal AI loop if in fine-tuning mode
+            if self.fine_tune_mode:
+                hub.sleep(1)  # Just sleep, wait for external commands
+                continue
+            
             if self.use_ai:
                 self._ai_inference_step()
                 hub.sleep(2)  # Poll AI every 2 seconds
@@ -154,7 +175,7 @@ class MTDEngine:
         """Query the AI model and execute its decision."""
         obs = self._get_live_obs()
 
-        # 🛡️ SIM-TO-REAL SAFETY GUARD
+        # SIM-TO-REAL SAFETY GUARD
         # Prevents "Control Plane Thrashing" in edge cases.
         # If there is no threat (intensity < 0.1) and no active flows (flows < 0.05),
         # shuffling provides zero security benefit and only wastes control-plane overhead.

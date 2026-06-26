@@ -13,21 +13,27 @@ class ThreatDetector:
         self.alpha = alpha
         self.RATE_THRESHOLD = rate_threshold
         
-        # FIX: Lowered threshold to 0.50 to ensure L2 sweeps trigger the alarm
-        self.ATTACK_THRESHOLD = 0.50
-        self.CLEAR_THRESHOLD = 0.25  # Hysteresis to prevent flapping
+        # 🌟 LOWERED thresholds for more sensitive detection
+        self.ATTACK_THRESHOLD = 0.40  # Was 0.50
+        self.CLEAR_THRESHOLD = 0.20   # Was 0.25
         
         self.sources = defaultdict(lambda: {
             'dst_ips': set(), 'dst_ports': set(),
             'packet_count': 0, 'ewma_rate': 0.0,
             'last_ts': 0.0, 'iat_list': [],
-            'is_flagged': False
+            'is_flagged': False,
+            'peak_score': 0.0,  # 🌟 NEW: Track peak threat
+            'peak_time': 0.0    # 🌟 NEW: When peak occurred
         })
         
         self.is_under_attack = False
         self.max_threat_score = 0.0
         self.clean_interval = 10.0
         self.last_cleanup = time.time()
+        
+        # 🌟 NEW: Threat memory - keeps score high after attack
+        self.threat_memory_duration = 5.0  # seconds
+        self.last_high_threat_time = 0.0
 
     def process_packet(self, src_ip: str, dst_ip: str, dst_port: int, proto: int, timestamp: float = None):
         """Called by ipv4_handler.py for every IPv4/TCP/UDP packet."""
@@ -63,8 +69,15 @@ class ThreatDetector:
             self.last_cleanup = time.time()
             
         score = self._compute_threat_score(src)
+        
+        # 🌟 NEW: Track peak score and time
+        if score > src['peak_score']:
+            src['peak_score'] = score
+            src['peak_time'] = time.time()
+        
         if score > self.max_threat_score:
             self.max_threat_score = score
+            self.last_high_threat_time = time.time()  # 🌟 NEW
             
         if self.max_threat_score > self.ATTACK_THRESHOLD and not self.is_under_attack:
             self.is_under_attack = True
@@ -80,7 +93,6 @@ class ThreatDetector:
         # A. Shannon Entropy for Destination IPs
         n_ips = len(src['dst_ips'])
         ent_ip = math.log2(n_ips) if n_ips > 1 else 0.0
-        # 🌟 FIX: Normalize by 4.0 (log2(16)). Scanning 16 unique IPs is a definitive sweep.
         ent_ip_norm = min(ent_ip / 4.0, 1.0)
             
         # B. Shannon Entropy for Destination Ports
@@ -100,8 +112,7 @@ class ThreatDetector:
         # D. Rate normalization
         rate_norm = min(src['ewma_rate'] / self.RATE_THRESHOLD, 1.0)
         
-        # 🌟 FIX: Rebalanced weights. 
-        # IP Entropy and Rate are the most reliable indicators for both L2 and L3.
+        # Rebalanced weights
         score = (0.50 * ent_ip_norm) + (0.20 * ent_port_norm) + (0.10 * cv_norm) + (0.20 * rate_norm)
         return min(score, 1.0)
 
@@ -119,7 +130,6 @@ class ThreatDetector:
             n_ips = len(src['dst_ips'])
             n_ports = len(src['dst_ports'])
             
-            # Match the / 4.0 normalization from _compute_threat_score
             e_ip = min(math.log2(max(n_ips, 1)) / 4.0, 1.0)
             e_port = min(math.log2(max(n_ports, 1)) / 4.0, 1.0)
             rate = min(src['ewma_rate'] / self.RATE_THRESHOLD, 1.0)
@@ -150,19 +160,29 @@ class ThreatDetector:
         
         for src_ip, data in self.sources.items():
             score = self._compute_threat_score(data)
-            # Only return targets if there's an actual, significant threat
             if score > 0.4 and score > max_score: 
                 max_score = score
-                # The attacker scans the Virtual IPs, so dst_ips contains the targeted VIPs
                 top_targets = list(data['dst_ips'])
                 
         return top_targets    
 
     def get_max_intensity(self):
-        """Returns the continuous threat intensity (0.0 to 1.0) of the most aggressive source."""
+        """Returns the continuous threat intensity with memory effect."""
         max_score = 0.0
+        current_time = time.time()
+        
         for data in self.sources.values():
             score = self._compute_threat_score(data)
+            
+            # 🌟 NEW: Apply threat memory - use peak score if recent
+            time_since_peak = current_time - data['peak_time']
+            if time_since_peak < self.threat_memory_duration:
+                # Decay the peak score over time
+                memory_factor = 1.0 - (time_since_peak / self.threat_memory_duration)
+                memory_score = data['peak_score'] * memory_factor
+                score = max(score, memory_score)
+            
             if score > max_score:
                 max_score = score
-        return max_score    
+        
+        return max_score

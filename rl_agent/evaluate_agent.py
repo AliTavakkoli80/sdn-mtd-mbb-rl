@@ -67,6 +67,9 @@ def evaluate_model():
         
         # Get observation for this scenario
         obs = env._get_obs()
+
+        # Force max staleness (tau_t = 1.0) to show true penalty
+        obs[5] = 1.0 
         
         # Calculate reward for each action
         hold_reward = env._calculate_reward(0, obs)
@@ -109,12 +112,14 @@ def evaluate_model():
             done = False
             steps = 0
             
-            # Simulate an attack happening randomly
-            mock_app.threat_detector.is_under_attack = True
-            mock_app.threat_detector.intensity = 0.9
-            mock_app.flow_manager.active_flow_count = 50
+            # Reset per-episode metrics
+            episode_attacks = 0
+            episode_successful_attacks = 0
+            episode_shuffles = 0
+            episode_total_flows = 0
             
             while not done and steps < 50:
+                # Get action
                 if policy_type == 'drl':
                     action, _ = model.predict(obs, deterministic=True)
                 elif policy_type == 'periodic':
@@ -122,19 +127,31 @@ def evaluate_model():
                 else:
                     action = 0
                     
+                # Track threat level
+                threat_intensity = obs[4]
+                if threat_intensity > 0.5:
+                    episode_attacks += 1
+                    if action == 0:  # HOLD during high threat = failure
+                        episode_successful_attacks += 1
+                        
+                # Execute action
                 obs, reward, done, _, _ = env.step(action)
                 steps += 1
                 
                 if action > 0:
-                    qos_disruptions += 1
-                
-                if obs[4] > 0.5 and action == 0:
-                    attack_successes += 1
+                    episode_shuffles += 1
+                    
+                # Track flows
+                episode_total_flows += obs[6]
 
+        # Calculate rates
+        attack_success_rate = (episode_successful_attacks / max(episode_attacks, 1)) * 100
+        qos_disruption_rate = (episode_shuffles / steps) * 100
+        
         baseline_results.append({
             'Policy': policy_name,
-            'Attack_Success_Rate': (attack_successes / (episodes * 50)) * 100,
-            'QoS_Disruption_Rate': (qos_disruptions / (episodes * 50)) * 100
+            'Attack_Success_Rate': attack_success_rate,
+            'QoS_Disruption_Rate': qos_disruption_rate
         })
         print(f"   ✅ {policy_name} evaluated.")
 

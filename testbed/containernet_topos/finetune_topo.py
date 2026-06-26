@@ -338,20 +338,43 @@ def handle_command(cmd):
         
         elif action == 'attack_arp':
             h1 = net.get('h1')
-            # Scan using domain names (DNS will resolve to IPs)
-            h1.cmd('nohup bash -c "for i in $(seq 1 10); do arping -c 1 -w 1 host$i.com > /dev/null 2>&1; done" &')
-            return {'status': 'ok', 'message': 'ARP scan attack launched (background)'}
-        
+            # Attack for 10 seconds, then stop
+            h1.cmd('nohup bash -c "'
+                '  for round in $(seq 1 20); do '
+                '    for i in $(seq 1 10); do '
+                '      arping -c 1 -w 0.5 10.0.0.$i > /dev/null 2>&1 '
+                '    done '
+                '    sleep 0.5 '
+                '  done '
+                '" > /dev/null 2>&1 &')
+            return {'status': 'ok', 'message': 'INTERMITTENT ARP scan (10s burst)'}
+
         elif action == 'attack_syn':
             h1 = net.get('h1')
-            h1.cmd('nohup bash -c "for i in $(seq 1 10); do timeout 2 bash -c \'echo > /dev/tcp/host$i.com/22\' 2>/dev/null; done" &')
-            return {'status': 'ok', 'message': 'SYN scan attack launched (background)'}
-        
+            # Attack for 10 seconds
+            h1.cmd('nohup bash -c "'
+                '  for round in $(seq 1 10); do '
+                '    for i in $(seq 1 10); do '
+                '      for port in 22 80 443; do '
+                '        timeout 0.5 bash -c \"echo > /dev/tcp/10.0.0.$i/$port\" 2>/dev/null '
+                '      done '
+                '    done '
+                '    sleep 1 '
+                '  done '
+                '" > /dev/null 2>&1 &')
+            return {'status': 'ok', 'message': 'INTERMITTENT SYN scan (10s burst)'}
+
         elif action == 'attack_dns':
             h1 = net.get('h1')
-            h1.cmd(f'nohup bash -c "for i in $(seq 1 50); do nslookup host1.com {DNS_IP} > /dev/null 2>&1; done" &')
-            return {'status': 'ok', 'message': 'DNS flood attack launched (background)'}
-        
+            # Attack for 10 seconds
+            h1.cmd('nohup bash -c "'
+                '  for i in $(seq 1 100); do '
+                '    nslookup host1.com 10.0.0.254 > /dev/null 2>&1 '
+                '    sleep 0.1 '
+                '  done '
+                '" > /dev/null 2>&1 &')
+            return {'status': 'ok', 'message': 'INTERMITTENT DNS flood (10s burst)'}
+                
         elif action == 'start_iperf':
             h2 = net.get('h2')
             h1 = net.get('h1')
@@ -362,7 +385,7 @@ def handle_command(cmd):
             h2.cmd('iperf3 -s -D > /dev/null 2>&1')
             time.sleep(0.5)
             # Use domain name for iperf
-            h1.cmd('nohup iperf3 -c host2.com -t 300 -i 5 > /tmp/iperf.log 2>&1 &')
+            h1.cmd('nohup iperf3 -c host2.com -t 300 -i 5 -b 8M > /tmp/iperf.log 2>&1 &')
             return {'status': 'ok', 'message': 'iperf3 traffic started (300s)'}
         
         elif action == 'get_iperf':

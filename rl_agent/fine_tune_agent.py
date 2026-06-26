@@ -26,12 +26,13 @@ from containernet_env import ContainernetEnv
 
 
 class FineTuneLogger(BaseCallback):
-    """Logs fine-tuning progress to CSV."""
+    """Logs fine-tuning progress to CSV with correct cumulative timesteps."""
     
-    def __init__(self, log_dir, verbose=0):
+    def __init__(self, log_dir, base_timestep=500000, verbose=0):
         super().__init__(verbose)
         self.log_dir = log_dir
         self.log_file = None
+        self.base_timestep = base_timestep  # Where mock training ended
         
     def _on_training_start(self):
         os.makedirs(self.log_dir, exist_ok=True)
@@ -42,7 +43,9 @@ class FineTuneLogger(BaseCallback):
         obs = self.locals['new_obs'][0]
         action = self.locals['actions'][0]
         reward = self.locals['rewards'][0]
-        timestep = self.num_timesteps
+        
+        # 🌟 FIX: Add base_timestep to get cumulative timestep
+        timestep = self.num_timesteps + self.base_timestep
         
         self.log_file.write(
             f"{timestep},{reward:.4f},{action},{obs[4]:.4f},{obs[6]:.4f}\n"
@@ -51,7 +54,7 @@ class FineTuneLogger(BaseCallback):
         if timestep % 10 == 0:
             self.log_file.flush()
             action_names = ["HOLD", "GLOBAL", "TARGETED"]
-            print(f"  Step {timestep:4d} | {action_names[action]:8s} | "
+            print(f"  Step {timestep:7d} | {action_names[action]:8s} | "
                   f"R={reward:+6.2f} | Threat={obs[4]:.2f} | Flows={obs[6]:.2f}")
         
         return True
@@ -127,7 +130,7 @@ def main():
         sys.exit(1)
     
     # Create logger
-    logger = FineTuneLogger(run_dir)
+    logger = FineTuneLogger(run_dir, base_timestep=500000)
     
     print("\n" + "="*60)
     print("🚀 STARTING FINE-TUNING")
