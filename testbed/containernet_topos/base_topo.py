@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+###############################################################################
+# # MTD mappings (real IP -> virtual IP)
+# REAL_TO_VIRTUAL = {
+#     '10.0.0.1': '10.0.0.11',
+#     '10.0.0.2': '10.0.0.12'
+# }
+
+# DNS_SERVER_IP = '10.0.0.10'
+# # DNS_SERVER_IP = '10.0.0.254'  # DNS on separate IP (not protected)
+
+# # Topology discovery interval (seconds)
+# TOPOLOGY_DISCOVERY_INTERVAL = 15
+# TOPOLOGY_FULL_SCAN_CYCLES = 2   # every 2 intervals do a full scan
+###############################################################################
 
 from mininet.net import Containernet
 from mininet.node import RemoteController, OVSSwitch

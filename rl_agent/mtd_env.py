@@ -74,6 +74,9 @@ class MTDEnvironment(gym.Env):
     def _calculate_reward(self, action, obs):
         """
         Ambiguity-Aware Multi-Objective Reward Function with Control Plane Overhead.
+        
+        FIX: Staleness penalty only applies when there's actual threat.
+        This prevents the agent from shuffling just to reset the timer.
         """
         I_t = obs[4]  # Continuous Threat Intensity (0.0 to 1.0)
         tau_t = obs[5] # Time Staleness (0.0 to 1.0)
@@ -98,9 +101,18 @@ class MTDEnvironment(gym.Env):
 
         # --- MATHEMATICAL REWARD LOGIC ---
         
+        # Only penalize staleness when there's actual threat
+        # This prevents the agent from shuffling just to reset the timer
+        if I_t < 0.1:
+            # No significant threat - staleness doesn't matter
+            staleness_penalty = 0.0
+        else:
+            # Threat present - staleness increases risk
+            staleness_penalty = (self.W_TIME * tau_t) + (self.W_RISK * I_t * tau_t)
+        
         if action == 0: # HOLD
-            # Base staleness penalty + Threat-aware risk penalty
-            return - (self.W_TIME * tau_t) - (self.W_RISK * I_t * tau_t)
+            # Only penalize if there's a threat
+            return -staleness_penalty
             
         elif action == 1: # SHUFFLE_GLOBAL
             # High Ambiguity Security Gain - High QoS Cost - Overhead

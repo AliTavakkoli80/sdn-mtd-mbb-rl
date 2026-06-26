@@ -14,6 +14,9 @@ class PacketInHandler:
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
 
+        if eth.ethertype == 0x86dd:
+            return
+
         if eth.ethertype == const.ETH_TYPE_LLDP:
             return
 

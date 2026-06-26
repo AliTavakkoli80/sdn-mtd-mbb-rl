@@ -127,7 +127,7 @@ class MTDEngine:
             
         except Exception as e:
             self.app.logger.error(f"[MTD Engine] Failed to generate virtual pool: {e}")
-            return [f"10.0.100.{i}" for i in range(10, 60)]
+            return [f"10.0.0.{i}" for i in range(10, 60)]
 
     def start(self):
         """Starts the adaptive shuffling loop."""
@@ -153,6 +153,18 @@ class MTDEngine:
     def _ai_inference_step(self):
         """Query the AI model and execute its decision."""
         obs = self._get_live_obs()
+
+        # 🛡️ SIM-TO-REAL SAFETY GUARD
+        # Prevents "Control Plane Thrashing" in edge cases.
+        # If there is no threat (intensity < 0.1) and no active flows (flows < 0.05),
+        # shuffling provides zero security benefit and only wastes control-plane overhead.
+        threat_intensity = obs[4]
+        active_flows_norm = obs[6]
+        
+        if threat_intensity < 0.1 and active_flows_norm < 0.05:
+            # Network is completely idle. Force HOLD.
+            return
+
         action, _states = self.model.predict(obs, deterministic=True)
         
         if action > 0: 
