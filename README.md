@@ -37,7 +37,7 @@ A transparent, **Stateful Moving Target Defense (MTD)** framework for Software-D
 
 - **Stateful Zero-Downtime MTD (Make-Before-Break)**: Utilizes OpenFlow 1.3 Table Chaining. When a shuffle occurs, old mappings are moved to a "Grace Table" (Table 1) with a 15-second hard timeout, while new mappings are installed in the "Active Table" (Table 0). This guarantees active TCP sessions survive the IP change without triggering TCP Global Synchronization.
 - **Information-Theoretic L2/L3/L4 Threat Detection**: Monitors traffic using **Shannon Entropy**, **EWMA Rate Smoothing**, and **Inter-Arrival Time (IAT) Coefficient of Variation** to mathematically fingerprint automated scanners (like Nmap/arping) vs. legitimate human traffic.
-- **Cost-Aware Deep Reinforcement Learning**: A Proximal Policy Optimization (PPO) agent decides *when* to shuffle IPs. It uses an **Exponential TCP Collapse Penalty** to avoid shuffling during high network load, and a **Staleness Penalty** to force proactive shuffling before attackers can map the network.
+- **Cost-Aware Deep Reinforcement Learning**: A Proximal Policy Optimization (PPO) agent decides *when* and *how* to shuffle IPs (HOLD, GLOBAL, or TARGETED). It uses a **Multi-Objective Linear Scalarized Reward** balancing security gain against data-plane disruption ($D_a \cdot F_t$), flow-modification overhead, and proactive defense against staleness.
 - **Transparent IP Translation & Bulletproof DNS**: Real IPs hidden behind virtual IPs. Surgically modifies raw DNS bytes and recalculates RFC 1071 checksums to ensure strict Linux kernels accept translated DNS responses.
 - **Zero-Overhead Flow Tracking**: Tracks active OpenFlow flows via asynchronous `OFPFF_SEND_FLOW_REM` events to measure real-time QoS cost without polling the switches.
 - **Topology-Aware Edge Translation**: Discovers network topology via LLDP and accurately identifies edge vs. core switches, ensuring IP translation only happens at the network perimeter.
@@ -51,9 +51,12 @@ This project features a dual-mode MTD engine: **Heuristic Fallback** and **AI-Dr
 ### 1. The 7D State Space & Multi-Objective Reward
 The RL agent observes a 7-dimensional state vector: `[IP_Entropy, Port_Entropy, EWMA_Rate, IAT_CV, Threat_Flag, Time_Since_Shuffle, Active_Flows]`. 
 
-The reward function mathematically models the trade-off between Security and QoS:
-* **Exponential QoS Penalty**: Shuffling during high TCP load incurs an exponential penalty $-2.0 \times (e^{3 \cdot f_t} - 1)$ to model TCP Global Synchronization.
-* **Staleness Penalty**: Holding too long incurs a penalty proportional to the time since the last shuffle, forcing the agent to proactively randomize the network.
+The reward function mathematically models the trade-off between Security and QoS via linear scalarization:
+$$R(s_t, a_t) = W_{\text{SEC}} \cdot I_t \cdot M_a - W_{\text{QoS}} \cdot (D_a \cdot F_t) - W_{\text{FLOW}} \cdot \text{Cost}(a_t)$$
+* **Security Gain**: Proportional to threat intensity $I_t$ and action suitability $M_a$.
+* **Data-Plane QoS Penalty**: Penalizes shuffling active flows based on network disruption factor $D_a$ and active load $F_t$.
+* **Flow Modification Cost**: Penalizes OpenFlow table modification overhead $\text{Cost}(a_t)$ (Global vs. Targeted).
+* **Staleness Penalty**: When holding under threat ($a_t = 0, I_t \ge 0.1$), incurs $-(W_{\text{TIME}} \cdot \tau_t + W_{\text{RISK}} \cdot I_t \cdot \tau_t)$ to force proactive shuffling.
 
 ### 2. Training and Deployment
 ```bash

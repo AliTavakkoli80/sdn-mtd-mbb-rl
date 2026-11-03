@@ -208,3 +208,10 @@ __marimo__/
 
 collect.py
 all_python_codes.txt
+all_project_code.txt
+
+# Experiment artifacts, evaluation logs, models, and generated plots
+rl_agent/runs/run_202*
+rl_agent/*.csv
+rl_agent/*.zip
+rl_agent/plots/

@@ -42,28 +42,29 @@ class ContainernetEnv(gym.Env):
     
     def __init__(
         self,
-        ryu_api_url="http://127.0.0.1:8080",
+        ryu_api_url=None,
         cmd_socket_host="127.0.0.1",
         cmd_socket_port=9999,
-        step_duration=8.0,
-        attack_probability=0.7,
+        step_duration=0.6,
+        max_steps=42,
         render_mode=None
     ):
         super().__init__()
         
-        self.ryu_api_url = ryu_api_url
+        self.ryu_api_url = ryu_api_url or os.getenv("RYU_API_URL", "http://127.0.0.1:8088")
         self.cmd_socket_host = cmd_socket_host
         self.cmd_socket_port = cmd_socket_port
         self.step_duration = step_duration
-        self.attack_probability = attack_probability
+        self.max_steps = max_steps
         self.render_mode = render_mode
+        self._current_regime = None
         
         # Action space: HOLD, GLOBAL, TARGETED
         self.action_space = spaces.Discrete(3)
         
-        # Observation space: 7D vector (MUST match mock environment!)
+        # Observation space: 8D vector (MUST match mock environment!)
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(7,), dtype=np.float32
+            low=0.0, high=1.0, shape=(8,), dtype=np.float32
         )
         
         # State tracking
@@ -74,9 +75,12 @@ class ContainernetEnv(gym.Env):
         
         # Reward weights (MUST match mtd_env.py exactly!)
         self.W_TIME = 2.0
-        self.W_RISK = 8.0
-        self.W_SEC = 10.0
-        self.W_QOS = 15.0
+        self.W_RISK = 25.0
+        self.W_SEC = 20.0
+        self.W_QOS = 8.0
+        self.W_FLOW = 2.0
+        self.W_OVERHEAD = self.W_FLOW
+        self.ETA = 0.5
         
         # Scanned targets tracking (from Ryu state)
         self._last_scanned_targets = []
@@ -145,6 +149,13 @@ class ContainernetEnv(gym.Env):
                 f"Make sure topology is running: sudo python3 containernet_topos/finetune_topo.py"
             )
     
+    def _clear_threat_in_ryu(self):
+        """Request Ryu to clear its threat detector sources."""
+        try:
+            requests.post(f"{self.ryu_api_url}/mtd/clear_threat", timeout=2)
+        except Exception:
+            pass
+
     def reset(self, seed=None, options=None):
         """Reset the environment state (does NOT restart the topology)."""
         super().reset(seed=seed)
@@ -152,24 +163,28 @@ class ContainernetEnv(gym.Env):
         self.step_count = 0
         self.last_shuffle_time = time.time()
         self._last_scanned_targets = []
+        self._current_regime = None
         
         print(f"\n{'='*60}")
         print(f"🔄 [ContainernetEnv] Reset (episode {self.episode_count})")
         print(f"{'='*60}")
         
+        # Stop any residual attacks and clear Ryu threat state
+        self._send_command_to_topology({'action': 'stop_attacks'})
+        self._clear_threat_in_ryu()
+        time.sleep(1.0)
+        
         # Get initial observation
         obs = self._get_obs()
-        
         print(f"✅ Environment ready. Initial state: {np.round(obs, 2)}")
-        
         return obs, {}
     
-    def step(self, action):
+    def step(self, action, enable_mbb=True):
         """
         Execute one step in the real environment.
         
-        1. Send action to Ryu (if shuffle)
-        2. Optionally trigger an attack
+        1. Send action to Ryu (if shuffle) with enable_mbb parameter
+        2. Cycle through multi-regime traffic dynamics
         3. Wait for network dynamics
         4. Observe new state
         5. Calculate reward
@@ -178,21 +193,44 @@ class ContainernetEnv(gym.Env):
         
         # 1. Execute the agent's action
         if action == 1:
-            print(f"   🎲 Agent chose GLOBAL shuffle")
-            self._send_action_to_ryu(1)
+            print(f"   🎲 Agent chose GLOBAL shuffle (MBB={enable_mbb})")
+            self._send_action_to_ryu(1, enable_mbb=enable_mbb)
             self.last_shuffle_time = time.time()
         elif action == 2:
-            print(f"   🎯 Agent chose TARGETED shuffle")
-            self._send_action_to_ryu(2)
+            print(f"   🎯 Agent chose TARGETED shuffle (MBB={enable_mbb})")
+            self._send_action_to_ryu(2, enable_mbb=enable_mbb)
             self.last_shuffle_time = time.time()
         else:
             print(f"   ⏸️  Agent chose HOLD")
         
-        # 2. Optionally trigger an attack (environment dynamics)
-        if np.random.random() < self.attack_probability:
-            attack_type = np.random.choice(['attack_arp', 'attack_syn', 'attack_dns'])
-            print(f"   🚨 Launching {attack_type}...")
-            self._send_command_to_topology({'action': attack_type})
+        # 2. Cycle through multi-regime traffic dynamics across realistic horizon
+        cycle_step = self.step_count % self.max_steps
+        if cycle_step < 5:
+            if cycle_step == 0 or self._current_regime != "quiescent":
+                self._current_regime = "quiescent"
+                print(f"   🕊️  [ContainernetEnv] Entering Quiescent Settling Regime (No Attacks)")
+                self._send_command_to_topology({'action': 'stop_attacks'})
+                self._clear_threat_in_ryu()
+        elif cycle_step < 11:
+            if self._current_regime != "targeted":
+                self._current_regime = "targeted"
+                print(f"   🎯 [ContainernetEnv] Entering Targeted Port-Scan Regime (hosts: 10.0.0.2, 10.0.0.3, ports: 80, 22, 443, 8080, 21)")
+                self._send_command_to_topology({
+                    'action': 'attack_targeted',
+                    'targets': ['10.0.0.2', '10.0.0.3'],
+                    'ports': [80, 22, 443, 8080, 21]
+                })
+        elif cycle_step < 15:
+            if self._current_regime != "global":
+                self._current_regime = "global"
+                print(f"   ⛈️  [ContainernetEnv] Entering Global Subnet Sweep Regime")
+                self._send_command_to_topology({'action': 'attack_arp'})
+        else:
+            if self._current_regime != "post_quiescent":
+                self._current_regime = "post_quiescent"
+                print(f"   🕊️  [ContainernetEnv] Entering Post-Attack Quiescent Regime (>15s Grace Expiration Window)")
+                self._send_command_to_topology({'action': 'stop_attacks'})
+                self._clear_threat_in_ryu()
         
         # 3. Wait for network dynamics to play out
         time.sleep(self.step_duration)
@@ -205,18 +243,18 @@ class ContainernetEnv(gym.Env):
         
         # Episode terminates after N steps
         terminated = False
-        truncated = (self.step_count >= 50)  # 50 steps per episode
+        truncated = (self.step_count >= self.max_steps)
         
         if self.render_mode == "human":
             action_names = ["HOLD", "GLOBAL", "TARGETED"]
-            print(f"   Step {self.step_count}: {action_names[action]} | "
-                  f"Reward: {reward:+.2f} | Threat: {obs[4]:.2f} | "
+            print(f"   Step {self.step_count:3d}: {action_names[action]:8s} | "
+                  f"Reward: {reward:+6.2f} | Threat: {obs[4]:.2f} | "
                   f"Flows: {obs[6]:.2f}")
         
         return obs, reward, terminated, truncated, {"action": action}
     
     def _get_obs(self):
-        """Query Ryu REST API for the current 7D observation vector."""
+        """Query Ryu REST API for the current 8D observation vector."""
         try:
             response = requests.get(f"{self.ryu_api_url}/mtd/state", timeout=5)
             data = response.json()
@@ -235,7 +273,11 @@ class ContainernetEnv(gym.Env):
             # Normalize flows (same as mock)
             flows_norm = min(flows / 100.0, 1.0)
             
-            # Construct 7D vector (MUST match mtd_env.py _get_obs() exactly!)
+            # Target cardinality (index 7)
+            scanned = len(self._last_scanned_targets)
+            scanned_norm = min(scanned / 16.0, 1.0)
+            
+            # Construct 8D vector (MUST match mtd_env.py _get_obs() exactly!)
             obs = np.array([
                 threat_state[0],  # ent_ip
                 threat_state[1],  # ent_port
@@ -243,7 +285,8 @@ class ContainernetEnv(gym.Env):
                 threat_state[3],  # cv
                 intensity,        # threat_intensity (index 4)
                 time_norm,        # time_staleness
-                flows_norm        # active_flows
+                flows_norm,       # active_flows
+                scanned_norm      # target_cardinality (index 7)
             ], dtype=np.float32)
             
             return obs
@@ -251,50 +294,55 @@ class ContainernetEnv(gym.Env):
         except Exception as e:
             print(f"⚠️  Failed to get state from Ryu: {e}")
             # Return zero vector on failure
-            return np.zeros(7, dtype=np.float32)
+            return np.zeros(8, dtype=np.float32)
     
     def _calculate_reward(self, action, obs):
         """
-        Calculate reward using the EXACT same formula as mtd_env.py.
-        This ensures the fine-tuned agent maintains the same learned behavior.
+        Calculate reward using the EXACT same unified formula as mtd_env.py:
+        R(s_t, a_t) =
+          0.0                                                           if a_t = 0 and I_t < 0.1
+          -(W_TIME * tau_t + W_RISK * I_t * tau_t)                     if a_t = 0 and I_t >= 0.1
+          W_SEC * I_t * M_a - W_QoS * (D_a * F_t) - W_FLOW * Cost(a_t)  if a_t in {1, 2}
         """
-        I_t = obs[4]   # Threat intensity
-        tau_t = obs[5] # Time staleness
-        F_t = obs[6]   # Active flows
+        I_t = float(obs[4])   # Threat intensity
+        tau_t = float(obs[5]) # Time staleness
+        F_t = float(obs[6])   # Active flows
         
-        # Disruption ratio (approximate using scanned targets)
-        # In real env, we assume 10 hosts total (same as mock)
-        total_hosts = 10
         if action == 0:
-            D_a = 0.0
-        elif action == 1:
-            D_a = 1.0  # Global disrupts 100%
-        elif action == 2:
-            scanned = len(self._last_scanned_targets)
-            D_a = min(scanned / total_hosts, 1.0)
-        
-        M_a = 1.5 if action == 1 else 1.0
-        W_OVERHEAD = 2.0
-        
-        if action == 0:  # HOLD
-            return -(self.W_TIME * tau_t) - (self.W_RISK * I_t * tau_t)
-        elif action == 1:  # GLOBAL
-            security_gain = self.W_SEC * I_t * M_a
-            qos_penalty = self.W_QOS * (D_a * F_t)
-            return security_gain - qos_penalty - W_OVERHEAD
-        elif action == 2:  # TARGETED
-            security_gain = self.W_SEC * I_t * M_a
-            qos_penalty = self.W_QOS * (D_a * F_t)
-            return security_gain - qos_penalty - W_OVERHEAD
+            if I_t < 0.1:
+                return 0.0
+            return -(self.W_TIME * tau_t + self.W_RISK * I_t * tau_t)
+
+        elif action in (1, 2):
+            cost_a = 1.0 if action == 1 else 0.2
+            if I_t < 0.1:
+                return -10.0 - (self.W_FLOW * cost_a)
+
+            scanned = len(self._last_scanned_targets) if self._last_scanned_targets else int(round(float(obs[7]) * 16.0)) if len(obs) > 7 else 0
+            if action == 1:  # GLOBAL
+                D_a = 1.0
+                M_a = 1.8 if (scanned > 4 or scanned == 0) else 1.0
+            else:  # TARGETED (action == 2)
+                D_a = min(max(scanned, 1) / 16.0, 1.0)
+                if 0 < scanned <= 4:
+                    # Calibrated high reward for targeted shuffling during localized attacks
+                    M_a = 2.0
+                elif scanned > 4:
+                    M_a = 0.3
+                else:
+                    M_a = 0.0
+
+            sec_gain = self.W_SEC * I_t * M_a
+            return sec_gain - (self.W_QOS * (D_a * F_t)) - (self.W_FLOW * cost_a)
         
         return 0.0
     
-    def _send_action_to_ryu(self, action):
+    def _send_action_to_ryu(self, action, enable_mbb=True):
         """Send action to Ryu via REST API."""
         try:
             response = requests.post(
                 f"{self.ryu_api_url}/mtd/action",
-                json={'action': action},
+                json={'action': action, 'enable_mbb': enable_mbb},
                 timeout=5
             )
             if response.status_code == 200:
@@ -308,7 +356,7 @@ class ContainernetEnv(gym.Env):
         """Send command to Containernet topology via socket."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(5)
+            s.settimeout(10)
             s.connect((self.cmd_socket_host, self.cmd_socket_port))
             s.sendall(json.dumps(cmd_dict).encode())
             response = json.loads(s.recv(4096).decode())

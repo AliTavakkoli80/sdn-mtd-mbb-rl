@@ -63,7 +63,7 @@ class MTDStateAPI(ControllerBase):
         try:
             threat_state = self.mtd_app.threat_detector.get_state().tolist()
             intensity = self.mtd_app.threat_detector.get_max_intensity()
-            flows = self.mtd_app.flow_manager.active_flow_count
+            flows = self.mtd_app.flow_manager.get_active_flow_count()
             scanned = self.mtd_app.threat_detector.get_scanned_targets()
             is_attack = bool(self.mtd_app.threat_detector.is_under_attack)
             
@@ -71,8 +71,11 @@ class MTDStateAPI(ControllerBase):
                 'threat_state': threat_state,
                 'intensity': float(intensity),
                 'active_flows': int(flows),
+                'active_sessions': len(getattr(self.mtd_app.flow_manager, 'active_sessions', {})),
                 'scanned_targets': scanned,
-                'is_under_attack': is_attack
+                'is_under_attack': is_attack,
+                'real_to_virtual': dict(self.mtd_app.real_to_virtual),
+                'current_mapping': dict(self.mtd_app.real_to_virtual)
             }
             
             # Use .encode('utf-8') to convert string to bytes
@@ -87,19 +90,57 @@ class MTDStateAPI(ControllerBase):
                 body=json.dumps({'error': str(e)}).encode('utf-8')
             )
 
+    @route('mtd', '/mtd/clear_threat', methods=['POST'])
+    def clear_threat(self, req, **kwargs):
+        """Immediately clears threat detector state to enter quiescent regime."""
+        try:
+            self.mtd_app.threat_detector.sources.clear()
+            self.mtd_app.threat_detector.is_under_attack = False
+            self.mtd_app.threat_detector.max_threat_score = 0.0
+            self.mtd_app.threat_detector.last_high_threat_time = 0.0
+            return Response(
+                content_type='application/json',
+                body=json.dumps({'status': 'ok', 'message': 'Threat state cleared'}).encode('utf-8')
+            )
+        except Exception as e:
+            return Response(
+                status=500,
+                content_type='application/json',
+                body=json.dumps({'error': str(e)}).encode('utf-8')
+            )
+
+    @route('mtd', '/mtd/reset_counters', methods=['POST'])
+    def reset_counters(self, req, **kwargs):
+        """Resets flow modification and session counters."""
+        try:
+            self.mtd_app.flow_manager.flow_mod_count = 0
+            n_sess = len(getattr(self.mtd_app.flow_manager, 'active_sessions', {}))
+            self.mtd_app.flow_manager.active_flow_count = n_sess * 4
+            return Response(
+                content_type='application/json',
+                body=json.dumps({'status': 'ok', 'message': f'Counters reset (active_flows={n_sess * 4})'}).encode('utf-8')
+            )
+        except Exception as e:
+            return Response(
+                status=500,
+                content_type='application/json',
+                body=json.dumps({'error': str(e)}).encode('utf-8')
+            )
+
     @route('mtd', '/mtd/action', methods=['POST'])
     def execute_action(self, req, **kwargs):
-        """Executes an MTD action (GLOBAL=1, TARGETED=2)."""
+        """Executes an MTD action (GLOBAL=1, TARGETED=2). Supports enable_mbb boolean flag."""
         try:
             data = json.loads(req.body or '{}')
             action = int(data.get('action', 0))
+            enable_mbb = bool(data.get('enable_mbb', True))
             
             if action == 1:
-                self.mtd_app.mtd_engine.step(action=1)
-                msg = "GLOBAL shuffle executed"
+                self.mtd_app.mtd_engine.step(action=1, enable_mbb=enable_mbb)
+                msg = f"GLOBAL shuffle executed (MBB={enable_mbb})"
             elif action == 2:
-                self.mtd_app.mtd_engine.step(action=2)
-                msg = "TARGETED shuffle executed"
+                self.mtd_app.mtd_engine.step(action=2, enable_mbb=enable_mbb)
+                msg = f"TARGETED shuffle executed (MBB={enable_mbb})"
             elif action == 0:
                 msg = "HOLD (no action)"
             else:
@@ -112,7 +153,23 @@ class MTDStateAPI(ControllerBase):
             # Use .encode('utf-8') to convert string to bytes
             return Response(
                 content_type='application/json',
-                body=json.dumps({'status': 'ok', 'message': msg}).encode('utf-8')
+                body=json.dumps({'status': 'ok', 'message': msg, 'enable_mbb': enable_mbb}).encode('utf-8')
+            )
+        except Exception as e:
+            return Response(
+                status=500,
+                content_type='application/json',
+                body=json.dumps({'error': str(e)}).encode('utf-8')
+            )
+
+    @route('mtd', '/mtd/flowmod_count', methods=['GET'])
+    def get_flowmod_count(self, req, **kwargs):
+        """Returns the cumulative count of FLOW_MOD operations executed."""
+        try:
+            count = int(getattr(self.mtd_app.flow_manager, 'flow_mod_count', 0))
+            return Response(
+                content_type='application/json',
+                body=json.dumps({'status': 'ok', 'flow_mod_count': count}).encode('utf-8')
             )
         except Exception as e:
             return Response(
@@ -174,16 +231,19 @@ class MTDMovingTargetDefense(app_manager.RyuApp):
         LOG.info("="*80)
 
     def _discovery_loop(self):
-        interval = config.TOPOLOGY_DISCOVERY_INTERVAL
-        cycles = config.TOPOLOGY_FULL_SCAN_CYCLES
-        i = 0
+        hub.sleep(1)
+        try:
+            self.topology.discover()
+            self.topology.log_summary()
+        except Exception as e:
+            LOG.warning(f"[topology] Initial discovery warning: {e}")
+        interval = 5
         while True:
-            if i == cycles:
-                self.topology.discover()
-                self.topology.log_summary()
-                i = 0
             hub.sleep(interval)
-            i += 1
+            try:
+                self.topology.discover()
+            except Exception:
+                pass
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -213,4 +273,10 @@ class MTDMovingTargetDefense(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
     def flow_removed_handler(self, ev):
         """Tracks active flows for the RL agent's QoS cost metric with ZERO polling overhead."""
-        self.flow_manager.active_flow_count = max(0, self.flow_manager.active_flow_count - 1)    
+        self.flow_manager.active_flow_count = max(0, self.flow_manager.active_flow_count - 1)
+        msg = ev.msg
+        if msg.table_id == const.TABLE_GRACE or msg.cookie == const.COOKIE_MTD_GRACE:
+            self.logger.info(
+                f"🧹 [OVS Datapath] Table 1 Grace Flow expired on S{msg.datapath.id} "
+                f"(reason={msg.reason}, packets={msg.packet_count}, duration={msg.duration_sec}s)"
+            )    

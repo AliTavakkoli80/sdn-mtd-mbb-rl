@@ -4,6 +4,7 @@ from . import constants as const
 class ARPHandler:
     def __init__(self, app):
         self.app = app
+        self.pending_virtual_arp = {}  # (requester_real_ip, target_real_ip) -> virtual_requested_ip
 
     def handle_arp(self, datapath, in_port, pkt, eth, arp_pkt, buffer_id):
         op = "REQUEST" if arp_pkt.opcode == arp.ARP_REQUEST else "REPLY"
@@ -11,7 +12,7 @@ class ARPHandler:
         self.app.topology.register_host(datapath.id, in_port, arp_pkt.src_ip, arp_pkt.src_mac)
 
         if arp_pkt.opcode == arp.ARP_REQUEST:
-            # 🌟 Q1 UPGRADE: Feed ARP requests to the unified threat detector for L2 Sweep Detection
+            # Uniform L2 Sweep Detection across all source hosts without IP restrictions
             self.app.threat_detector.process_arp_request(arp_pkt.src_ip, arp_pkt.dst_ip)
             self._handle_request(datapath, in_port, pkt, eth, arp_pkt, buffer_id)
         else:
@@ -22,15 +23,64 @@ class ARPHandler:
         sender_ip = arp_pkt.src_ip
         sender_mac = arp_pkt.src_mac
 
-        # DNS server
-        if target == self.app.dns_ip or sender_ip == self.app.dns_ip:
-            self.app.logger.info("[arp] DNS ARP - flood all hosts")
-            self._flood_to_all_hosts(pkt.data, datapath.id, in_port)
-            return
+        # 1. DNS Server Queries (target == dns_ip)
+        if target == self.app.dns_ip:
+            loc = self.app.topology.host_table.get(self.app.dns_ip)
+            if loc and loc.get('mac'):
+                reply_pkt = self._build_reply(loc['mac'], self.app.dns_ip, sender_mac, sender_ip)
+                actions = [datapath.ofproto_parser.OFPActionOutput(in_port)]
+                out = datapath.ofproto_parser.OFPPacketOut(
+                    datapath=datapath, buffer_id=datapath.ofproto.OFP_NO_BUFFER,
+                    in_port=datapath.ofproto.OFPP_CONTROLLER, actions=actions, data=reply_pkt.data
+                )
+                datapath.send_msg(out)
+                self.app.logger.info(f"[arp] Direct Proxy ARP for DNS {self.app.dns_ip} -> {loc['mac']} sent to {sender_ip}")
+                return
+            elif loc:
+                self.app.logger.info(f"[arp] DNS known at S{loc['dpid']}:{loc['port']} - direct request")
+                self._send_to_host(pkt.data, loc['dpid'], loc['port'])
+                return
+            else:
+                self.app.logger.info("[arp] DNS location unknown - flood all hosts")
+                self._flood_to_all_hosts(pkt.data, datapath.id, in_port)
+                return
 
-        # Virtual IP request
+        # 2. DNS Server asking for client MAC
+        if sender_ip == self.app.dns_ip:
+            loc = self.app.topology.host_table.get(target)
+            if loc and loc.get('mac'):
+                reply_pkt = self._build_reply(loc['mac'], target, sender_mac, sender_ip)
+                actions = [datapath.ofproto_parser.OFPActionOutput(in_port)]
+                out = datapath.ofproto_parser.OFPPacketOut(
+                    datapath=datapath, buffer_id=datapath.ofproto.OFP_NO_BUFFER,
+                    in_port=datapath.ofproto.OFPP_CONTROLLER, actions=actions, data=reply_pkt.data
+                )
+                datapath.send_msg(out)
+                self.app.logger.info(f"[arp] Direct Proxy ARP for client {target} -> {loc['mac']} sent to DNS {sender_ip}")
+                return
+            elif loc:
+                self._send_to_host(pkt.data, loc['dpid'], loc['port'])
+                return
+            else:
+                self._flood_to_all_hosts(pkt.data, datapath.id, in_port)
+                return
+
+        # 3. Virtual IP request: Proxy ARP with target host MAC
         if target in self.app.virtual_to_real:
             real_target = self.app.virtual_to_real[target]
+            loc = self.app.topology.host_table.get(real_target)
+            if loc and loc.get('mac'):
+                reply_pkt = self._build_reply(loc['mac'], target, sender_mac, sender_ip)
+                actions = [datapath.ofproto_parser.OFPActionOutput(in_port)]
+                out = datapath.ofproto_parser.OFPPacketOut(
+                    datapath=datapath, buffer_id=datapath.ofproto.OFP_NO_BUFFER,
+                    in_port=datapath.ofproto.OFPP_CONTROLLER, actions=actions, data=reply_pkt.data
+                )
+                datapath.send_msg(out)
+                self.app.logger.info(f"[arp] Proxy ARP: Virtual {target} ({real_target}) -> {loc['mac']} to {sender_ip}")
+                return
+
+            self.pending_virtual_arp[(sender_ip, real_target)] = target
             self.app.logger.info(f"[arp] virtual {target} → {real_target}")
             new_pkt = self._build_request(sender_mac, sender_ip, real_target)
             if real_target not in self.app.topology.host_table:
@@ -40,6 +90,22 @@ class ARPHandler:
                 loc = self.app.topology.host_table[real_target]
                 self.app.logger.info(f"[arp] target known at S{loc['dpid']}:{loc['port']} - direct")
                 self._send_to_host(new_pkt.data, loc['dpid'], loc['port'])
+            return
+
+        # 4. Normal ARP for known real host: Proxy ARP
+        loc = self.app.topology.host_table.get(target)
+        if loc and loc.get('mac'):
+            reply_pkt = self._build_reply(loc['mac'], target, sender_mac, sender_ip)
+            actions = [datapath.ofproto_parser.OFPActionOutput(in_port)]
+            out = datapath.ofproto_parser.OFPPacketOut(
+                datapath=datapath, buffer_id=datapath.ofproto.OFP_NO_BUFFER,
+                in_port=datapath.ofproto.OFPP_CONTROLLER, actions=actions, data=reply_pkt.data
+            )
+            datapath.send_msg(out)
+            self.app.logger.info(f"[arp] Proxy ARP: Real host {target} -> {loc['mac']} to {sender_ip}")
+            return
+        elif loc:
+            self._send_to_host(pkt.data, loc['dpid'], loc['port'])
             return
 
         # Normal ARP: flood locally
@@ -65,18 +131,24 @@ class ARPHandler:
                 self._flood_locally(datapath, in_port, buffer_id, pkt.data)
             return
 
-        if target_ip in self.app.real_to_virtual:
-            virt_target = self.app.real_to_virtual[target_ip]
-            reply_sender = self.app.real_to_virtual.get(sender_ip, sender_ip)
-            new_pkt = self._build_reply(sender_mac, reply_sender, arp_pkt.dst_mac, virt_target)
-            if virt_target in self.app.virtual_to_real:
-                real_req = self.app.virtual_to_real[virt_target]
-                loc = self.app.topology.get_host_location_by_ip(real_req)
-                if loc[0]:
-                    self._send_to_host(new_pkt.data, loc[0], loc[1])
-                    return
-            self.app.logger.warning("[arp] requester unknown - flood locally")
+        # Check if this reply answers a pending virtual IP ARP request
+        if (target_ip, sender_ip) in self.pending_virtual_arp:
+            virtual_requested = self.pending_virtual_arp.pop((target_ip, sender_ip))
+            # Translate sender_ip to the requested virtual IP, keeping target_ip as the real client IP!
+            new_pkt = self._build_reply(sender_mac, virtual_requested, arp_pkt.dst_mac, target_ip)
+            loc = self.app.topology.get_host_location_by_ip(target_ip)
+            if loc[0] and loc[1]:
+                self.app.logger.info(f"[arp] Delivering virtual ARP reply for {virtual_requested} to {target_ip} at S{loc[0]}:p{loc[1]}")
+                self._send_to_host(new_pkt.data, loc[0], loc[1])
+                return
             self._flood_locally(datapath, in_port, datapath.ofproto.OFP_NO_BUFFER, new_pkt.data)
+            return
+
+        # Normal ARP reply (between real hosts): deliver directly to target if known, else flood locally
+        loc = self.app.topology.get_host_location_by_ip(target_ip)
+        if loc[0] and loc[1]:
+            self.app.logger.info(f"[arp] Direct delivery of normal ARP reply to {target_ip} at S{loc[0]}:p{loc[1]}")
+            self._send_to_host(pkt.data, loc[0], loc[1])
             return
 
         self.app.logger.info("[arp] normal reply - flood locally")

@@ -11,4 +11,5 @@ RUN apk add --no-cache \
     iputils \
     bind-tools \
     iproute2 \
-    curl
+    curl \
+    python3

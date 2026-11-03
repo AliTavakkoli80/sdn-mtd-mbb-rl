@@ -69,10 +69,17 @@ class TopologyManager:
 
     def register_host(self, dpid, in_port, ip, mac):
         """Register host if port is an access port."""
+        is_access = False
         if dpid in self.access_ports and in_port in self.access_ports[dpid]:
-            if ip in self.app.real_to_virtual:
+            is_access = True
+        elif dpid not in [17, 18, 0x11, 0x12] and in_port not in self.interior_ports.get(dpid, set()):
+            is_access = True
+            self.access_ports.setdefault(dpid, set()).add(in_port)
+
+        if is_access:
+            if ip in self.app.real_to_virtual or ip == getattr(self.app, 'dns_ip', '10.0.0.254'):
                 self.host_table[ip] = {'mac': mac, 'dpid': dpid, 'port': in_port}
-                virt = self.app.real_to_virtual.get(ip, 'N/A')
+                virt = self.app.real_to_virtual.get(ip, 'DNS' if ip == getattr(self.app, 'dns_ip', '10.0.0.254') else 'N/A')
                 self.app.logger.info(f"\n[host] ✓ NEW HOST: {ip} → VIRTUAL: {virt} at S{dpid}:p{in_port} MAC:{mac}")
 
             prev = self.access_table.get((dpid, in_port))
@@ -111,6 +118,54 @@ class TopologyManager:
             if mac in mac_table:
                 return dpid, mac_table[mac]
         return None, None
+
+    @property
+    def spine_switches(self):
+        """Spine switches in the 2-Spine fabric (no direct host access ports)."""
+        spines = [sw for sw in self.switches if len(self.access_ports.get(sw, set())) == 0 or sw >= 10]
+        if not spines:
+            spines = [sw for sw in self.datapath_list.keys() if sw >= 10]
+        return sorted(spines)
+
+    @property
+    def leaf_switches(self):
+        """Leaf switches (access switches with host ports)."""
+        leafs = [sw for sw in self.switches if sw not in self.spine_switches]
+        if not leafs:
+            leafs = [sw for sw in self.datapath_list.keys() if sw < 10]
+        return sorted(leafs)
+
+    def get_spine_for_flow(self, src_dpid, dst_dpid, flow_key=None):
+        """
+        Deterministic ECMP Spine Selection:
+        Hashes flow_key to select between Spine 1 and Spine 2, achieving loop-free ECMP.
+        """
+        available = []
+        for sp in self.spine_switches:
+            if (src_dpid, sp) in self.link_to_port and (sp, dst_dpid) in self.link_to_port:
+                available.append(sp)
+        if not available:
+            return self.spine_switches[0] if self.spine_switches else None
+        if flow_key is None:
+            return available[0]
+        h = abs(hash(str(flow_key)))
+        return available[h % len(available)]
+
+    def get_inter_switch_route(self, src_dpid, dst_dpid, flow_key=None):
+        """
+        Returns (spine_dpid, port_src_to_spine, port_spine_to_dst, port_dst_to_spine, port_spine_to_src)
+        for deterministic 2-hop routing (Leaf_src -> Spine_k -> Leaf_dst).
+        """
+        if src_dpid == dst_dpid:
+            return None
+        spine_dpid = self.get_spine_for_flow(src_dpid, dst_dpid, flow_key=flow_key)
+        if not spine_dpid:
+            return None
+        port_src_to_spine = self.link_to_port.get((src_dpid, spine_dpid), (None, None))[0]
+        port_spine_to_dst = self.link_to_port.get((spine_dpid, dst_dpid), (None, None))[0]
+        port_dst_to_spine = self.link_to_port.get((dst_dpid, spine_dpid), (None, None))[0]
+        port_spine_to_src = self.link_to_port.get((spine_dpid, src_dpid), (None, None))[0]
+        return spine_dpid, port_src_to_spine, port_spine_to_dst, port_dst_to_spine, port_spine_to_src
 
     def log_summary(self):
         self.app.logger.info("\n" + "─"*80)

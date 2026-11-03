@@ -12,10 +12,12 @@ cd "$PROJECT_DIR"
 echo " Project Directory: $PROJECT_DIR"
 
 # Activate virtual environment
-if [ -d "venv" ]; then
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+elif [ -d "venv" ]; then
     source venv/bin/activate
 else
-    echo "❌ Error: 'venv' directory not found. Please activate your environment manually."
+    echo "❌ Error: Virtual environment (.venv/venv) not found. Please activate your environment manually."
     exit 1
 fi
 
@@ -48,11 +50,11 @@ trap cleanup EXIT INT TERM
 wait_for_port() {
     local port=$1
     local name=$2
-    local timeout=60
+    local timeout=90
     local elapsed=0
     
     echo " Waiting for $name to be ready on port $port..."
-    while ! (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; do
+    while ! "$PROJECT_DIR/.venv/bin/python" -c "import socket; s = socket.socket(); s.settimeout(1); s.connect(('127.0.0.1', $port)); s.close()" 2>/dev/null; do
         sleep 1
         elapsed=$((elapsed + 1))
         if [ $elapsed -ge $timeout ]; then
@@ -65,16 +67,16 @@ wait_for_port() {
 
 # 4. Start Ryu Controller
 echo -e "\n🧠 Starting Ryu Controller..."
-PYTHONPATH=. ryu-manager mtd_ip_shuffling.app --observe-links > ryu_experiment.log &
+export RYU_API_URL="http://127.0.0.1:8088"
+PYTHONPATH="$PROJECT_DIR" "$PROJECT_DIR/.venv/bin/ryu-manager" mtd_ip_shuffling.app --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8088 > ryu_experiment.log 2>&1 &
 RYU_PID=$!
 
-# Wait for Ryu REST API (Port 8080)
-wait_for_port 8080 "Ryu REST API"
+# Wait for Ryu REST API (Port 8088)
+wait_for_port 8088 "Ryu REST API"
 
 # 5. Start Containernet Topology
-echo -e "\n Starting Containernet Topology (Requires sudo)..."
-# Note: sudo might prompt for a password here if not configured for passwordless sudo
-sudo python3 testbed/containernet_topos/finetune_topo.py > topo_finetune.log 2>&1 &
+echo -e "\n🌐 Starting Containernet Topology (Requires sudo)..."
+sudo -E RYU_API_URL="http://127.0.0.1:8088" "$PROJECT_DIR/.venv/bin/python" testbed/containernet_topos/finetune_topo.py > topo_finetune.log 2>&1 &
 TOPO_PID=$!
 
 # Wait for Command Socket (Port 9999)
@@ -84,17 +86,27 @@ wait_for_port 9999 "Containernet Command Socket"
 echo -e "\n🎓 Starting Sim-to-Real Fine-Tuning..."
 echo "   (Passing arguments: $@)"
 echo "   Logs will be saved to the respective run directory."
-echo "   Press Ctrl+C to stop early."
 
 # Run the fine-tuning script in the foreground
-python rl_agent/fine_tune_agent.py "$@"
+"$PROJECT_DIR/.venv/bin/python" rl_agent/fine_tune_agent.py "$@"
 FINE_TUNE_EXIT_CODE=$?
 
-# 7. Finish
 if [ $FINE_TUNE_EXIT_CODE -eq 0 ]; then
     echo -e "\n🎉 Fine-tuning completed successfully!"
+    
+    # 7. Run Data-Plane Make-Before-Break (Table Chaining) Benchmark on Live Testbed
+    echo -e "\n🔬 [Phase 2] Running Data-Plane Make-Before-Break Throughput Benchmark..."
+    "$PROJECT_DIR/.venv/bin/python" rl_agent/benchmark_dataplane_mbb.py
+    
+    # 8. Run Real Evaluation
+    echo -e "\n📊 [Phase 2] Running Real Agent Evaluation..."
+    "$PROJECT_DIR/.venv/bin/python" rl_agent/evaluate_real_agent.py
+    
+    # 9. Generate All Publication Visualizations
+    echo -e "\n📈 [Phase 2] Generating All Visualizations..."
+    "$PROJECT_DIR/.venv/bin/python" rl_agent/visualize_results.py
 else
-    echo -e "\n️  Fine-tuning exited with code $FINE_TUNE_EXIT_CODE."
+    echo -e "\n⚠️  Fine-tuning exited with code $FINE_TUNE_EXIT_CODE."
 fi
 
 # The 'trap' will automatically handle the cleanup of Ryu and Topology

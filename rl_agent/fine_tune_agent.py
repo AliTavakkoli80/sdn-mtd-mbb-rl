@@ -21,14 +21,15 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
 # Add parent dir to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPT_DIR)
 from containernet_env import ContainernetEnv
 
 
 class FineTuneLogger(BaseCallback):
     """Logs fine-tuning progress to CSV with correct cumulative timesteps."""
     
-    def __init__(self, log_dir, base_timestep=500000, verbose=0):
+    def __init__(self, log_dir, base_timestep=300000, verbose=0):
         super().__init__(verbose)
         self.log_dir = log_dir
         self.log_file = None
@@ -44,14 +45,16 @@ class FineTuneLogger(BaseCallback):
         action = self.locals['actions'][0]
         reward = self.locals['rewards'][0]
         
-        # 🌟 FIX: Add base_timestep to get cumulative timestep
-        timestep = self.num_timesteps + self.base_timestep
+        # Cumulative timestep across pre-training and fine-tuning
+        timestep = self.num_timesteps
+        if timestep < self.base_timestep:
+            timestep += self.base_timestep
         
         self.log_file.write(
             f"{timestep},{reward:.4f},{action},{obs[4]:.4f},{obs[6]:.4f}\n"
         )
         
-        if timestep % 10 == 0:
+        if self.n_calls % 5 == 0:
             self.log_file.flush()
             action_names = ["HOLD", "GLOBAL", "TARGETED"]
             print(f"  Step {timestep:7d} | {action_names[action]:8s} | "
@@ -84,6 +87,8 @@ def main():
                        help='Path to pre-trained model (.zip). If not specified, uses latest run.')
     parser.add_argument('--steps', type=int, default=500,
                        help='Number of fine-tuning steps (default: 500)')
+    parser.add_argument('--n_steps', type=int, default=64,
+                       help='Rollout buffer size for live fine-tuning (default: 64)')
     parser.add_argument('--lr', type=float, default=0.0001,
                        help='Learning rate for fine-tuning (default: 0.0001, lower than training)')
     args = parser.parse_args()
@@ -111,7 +116,7 @@ def main():
     print(f"📦 Loading pre-trained model: {model_path}")
     
     # Load the pre-trained model
-    model = PPO.load(model_path)
+    model = PPO.load(model_path, device="cpu")
     
     # Determine output path (same run directory)
     run_dir = os.path.dirname(model_path)
@@ -130,7 +135,7 @@ def main():
         sys.exit(1)
     
     # Create logger
-    logger = FineTuneLogger(run_dir, base_timestep=500000)
+    logger = FineTuneLogger(run_dir, base_timestep=300000)
     
     print("\n" + "="*60)
     print("🚀 STARTING FINE-TUNING")
@@ -144,6 +149,23 @@ def main():
     try:
         # Attach the environment to the loaded model BEFORE learning
         model.set_env(env)
+        
+        # Reallocate rollout buffer with live testbed n_steps
+        from stable_baselines3.common.buffers import RolloutBuffer
+        model.n_steps = args.n_steps
+        model.rollout_buffer = RolloutBuffer(
+            model.n_steps,
+            model.observation_space,
+            model.action_space,
+            device=model.device,
+            gamma=model.gamma,
+            gae_lambda=model.gae_lambda,
+            n_envs=model.n_envs
+        )
+        print(f"⚙️  Adjusted live rollout buffer size: n_steps={args.n_steps}")
+        
+        initial_steps = model.num_timesteps
+        print(f"📊 Training for {args.steps} live steps from step {initial_steps}...")
         
         model.learn(
             total_timesteps=args.steps,
@@ -159,6 +181,9 @@ def main():
     print("="*60)
     model.save(output_path.replace('.zip', ''))
     print(f"✅ Saved to: {output_path}")
+    import shutil
+    shutil.copy(output_path, os.path.join(SCRIPT_DIR, "mtd_ppo_agent_real.zip"))
+    print(f"✅ Copied to: {os.path.join(SCRIPT_DIR, 'mtd_ppo_agent_real.zip')}")
     
     # Close environment
     env.close()

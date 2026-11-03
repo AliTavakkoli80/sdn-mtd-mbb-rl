@@ -24,7 +24,7 @@ class IPv4Handler:
             if udp_pkt:
                 dst_port = udp_pkt.dst_port
 
-        # 🌟 Q1 INTEGRATION: Feed packet to intelligent threat detector
+        # Feed all incoming IPv4 packets to threat detector without host exemptions
         self.app.threat_detector.process_packet(
             src_ip=src,
             dst_ip=dst,
@@ -43,8 +43,10 @@ class IPv4Handler:
         # MTD translation
         if dst in self.app.virtual_to_real:
             real_dst = self.app.virtual_to_real[dst]
-            self.app.logger.info(f"[mtd] virtual {dst} → real {real_dst}")
-            self.app.flow_manager.install_translation_flows(datapath, in_port, src, dst, real_dst)
+            self.app.logger.info(f"[mtd] virtual {dst} → real {real_dst} (proto={proto_name}, port={dst_port})")
+            self.app.flow_manager.install_translation_flows(
+                datapath, in_port, src, dst, real_dst, proto=proto, dst_port=dst_port
+            )
             self._translate_and_forward(datapath, in_port, dst, real_dst, buffer_id, raw_data)
         else:
             self.app.logger.info("[ipv4] normal traffic")
@@ -53,9 +55,19 @@ class IPv4Handler:
     def _translate_and_forward(self, datapath, in_port, virtual_dst, real_dst, buffer_id, raw_data):
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
+        dpid, out_port = self.app.topology.get_host_location_by_ip(real_dst)
+        if dpid == datapath.id and out_port is not None:
+            out_action = parser.OFPActionOutput(out_port)
+        else:
+            route = self.app.topology.get_inter_switch_route(datapath.id, dpid, flow_key=real_dst)
+            if route and route[1] is not None:
+                out_action = parser.OFPActionOutput(route[1])
+            else:
+                self.app.logger.warning(f"[mtd] No inter-switch route found from S{datapath.id} to S{dpid} for {real_dst}")
+                return
         actions = [
             parser.OFPActionSetField(ipv4_dst=real_dst),
-            parser.OFPActionOutput(ofproto.OFPP_NORMAL)
+            out_action
         ]
         out = parser.OFPPacketOut(
             datapath=datapath,
@@ -68,6 +80,7 @@ class IPv4Handler:
         self.app.logger.info("[mtd] first packet translated")
 
     def _handle_dns_response(self, datapath, in_port, pkt, eth, ipv4_pkt, udp_pkt, buffer_id, raw_data):
+        client_ip = ipv4_pkt.dst
         try:
             # 1. Dynamically find the start of the IP header (Handles VLAN tags safely)
             ip_start = 14
@@ -79,7 +92,7 @@ class IPv4Handler:
             dns_start = udp_start + 8
             
             if len(raw_data) < dns_start + 12:
-                self._forward_original(datapath, in_port, buffer_id, raw_data)
+                self._send_dns_packet(datapath, in_port, client_ip, bytes(raw_data))
                 return
 
             # 2. Parse the DNS payload
@@ -87,7 +100,7 @@ class IPv4Handler:
             dns_resp = DNSRecord.parse(bytes(dns_payload))
 
             if not (dns_resp.header.qr == 1 and dns_resp.rr):
-                self._forward_original(datapath, in_port, buffer_id, raw_data)
+                self._send_dns_packet(datapath, in_port, client_ip, bytes(raw_data))
                 return
 
             modified = False
@@ -97,7 +110,7 @@ class IPv4Handler:
                     if real_ip in self.app.real_to_virtual:
                         virt_ip = self.app.real_to_virtual[real_ip]
                         
-                        # 🛠️ BULLETPROOF PATCH: Find and replace the exact 4 bytes in the payload
+                        # Find and replace the exact 4 bytes in the payload
                         real_bytes = socket.inet_aton(real_ip)
                         virt_bytes = socket.inet_aton(virt_ip)
                         
@@ -108,7 +121,7 @@ class IPv4Handler:
                             self.app.logger.info(f"[dns] {real_ip} → {virt_ip}")
 
             if not modified:
-                self._forward_original(datapath, in_port, buffer_id, raw_data)
+                self._send_dns_packet(datapath, in_port, client_ip, bytes(raw_data))
                 return
 
             # 3. Splice the modified DNS payload back into the original raw packet
@@ -139,38 +152,39 @@ class IPv4Handler:
             patched_raw_data[udp_csum_offset] = 0
             patched_raw_data[udp_csum_offset + 1] = 0
 
-            # 6. Send the mathematically perfect packet
-            client_ip = ipv4_pkt.dst
-            dpid, port = self.app.topology.get_host_location_by_ip(client_ip)
-            if dpid and port:
-                dp = self.app.topology.get_datapath(dpid)
-                if dp:
-                    actions = [dp.ofproto_parser.OFPActionOutput(port)]
-                    out = dp.ofproto_parser.OFPPacketOut(
-                        datapath=dp,
-                        buffer_id=dp.ofproto.OFP_NO_BUFFER,
-                        in_port=dp.ofproto.OFPP_CONTROLLER,
-                        actions=actions,
-                        data=bytes(patched_raw_data)
-                    )
-                    dp.send_msg(out)
-                    self.app.logger.info(f"[dns] direct to client {client_ip}")
-                    return
-
-            self.app.logger.warning("[dns] client unknown - fallback")
-            self._forward_original(datapath, in_port, buffer_id, bytes(patched_raw_data))
+            # 6. Deliver the modified DNS packet directly to the destination client
+            self._send_dns_packet(datapath, in_port, client_ip, bytes(patched_raw_data))
 
         except Exception as e:
             self.app.logger.error(f"[dns] error: {e}")
-            self._forward_original(datapath, in_port, buffer_id, raw_data)
+            self._send_dns_packet(datapath, in_port, client_ip, bytes(raw_data))
 
-    def _forward_original(self, datapath, in_port, buffer_id, data):
-        actions = [datapath.ofproto_parser.OFPActionOutput(datapath.ofproto.OFPP_NORMAL)]
-        out = datapath.ofproto_parser.OFPPacketOut(
-            datapath=datapath,
-            buffer_id=buffer_id if buffer_id != datapath.ofproto.OFP_NO_BUFFER else datapath.ofproto.OFP_NO_BUFFER,
-            in_port=in_port,
-            actions=actions,
-            data=data if buffer_id == datapath.ofproto.OFP_NO_BUFFER else None
-        )
-        datapath.send_msg(out)
+    def _send_dns_packet(self, datapath, in_port, client_ip, packet_data):
+        client_dpid, client_port = self.app.topology.get_host_location_by_ip(client_ip)
+        if client_dpid and client_port:
+            dp = self.app.topology.get_datapath(client_dpid)
+            if dp and client_dpid == datapath.id:
+                # Intra-leaf: direct output to host port
+                actions = [dp.ofproto_parser.OFPActionOutput(client_port)]
+                out = dp.ofproto_parser.OFPPacketOut(
+                    datapath=dp, buffer_id=dp.ofproto.OFP_NO_BUFFER,
+                    in_port=dp.ofproto.OFPP_CONTROLLER, actions=actions, data=packet_data
+                )
+                dp.send_msg(out)
+                self.app.logger.info(f"[dns] Delivered directly to client {client_ip} on S{client_dpid}:p{client_port}")
+                return
+            elif dp:
+                # Inter-leaf: route through spine to egress leaf
+                route = self.app.topology.get_inter_switch_route(datapath.id, client_dpid, flow_key=client_ip)
+                if route and route[1] is not None:
+                    port_to_sp = route[1]
+                    actions = [datapath.ofproto_parser.OFPActionOutput(port_to_sp)]
+                    out = datapath.ofproto_parser.OFPPacketOut(
+                        datapath=datapath, buffer_id=datapath.ofproto.OFP_NO_BUFFER,
+                        in_port=datapath.ofproto.OFPP_CONTROLLER, actions=actions, data=packet_data
+                    )
+                    datapath.send_msg(out)
+                    self.app.logger.info(f"[dns] Forwarded via Spine to client {client_ip} (S{client_dpid}:p{client_port})")
+                    return
+
+        self.app.logger.warning(f"[dns] Client {client_ip} location unknown - dropping packet to prevent loop")
