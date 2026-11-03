@@ -36,15 +36,17 @@ class MTDEnvironment(gym.Env):
         self.W_TIME = 2.0        # Base penalty for network staleness
         self.W_RISK = 25.0       # Multiplier for high-threat staleness (I_t * tau_t)
         self.W_SEC = 20.0        # Reward for successful threat mitigation
-        self.W_QOS = 8.0         # Penalty for disrupting active TCP flows
-        self.W_FLOW = 2.0        # Control plane overhead penalty (FlowMod cost weight)
+        self.W_QOS = 10.0        # Penalty for disrupting active TCP flows (increased to 10.0)
+        self.W_FLOW = 4.0        # Control plane overhead penalty (FlowMod cost weight, scaled to 4.0)
         self.W_OVERHEAD = self.W_FLOW
         self.ETA = 0.5           # Precision bonus for Targeted shuffling
+        self.load_ewma = None
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.last_shuffle_time = time.time()
         self.time_staleness = 0.0
+        self.load_ewma = None
         return self._get_obs(), {}
 
     def step(self, action):
@@ -75,12 +77,22 @@ class MTDEnvironment(gym.Env):
             time_since = time.time() - self.last_shuffle_time
             time_norm = min(time_since / self.max_shuffle_interval, 1.0)
         
-        # 7: Active flows
-        if hasattr(self.app.flow_manager, 'get_active_flow_count'):
+        # 7: Active flows / Network Load (normalized with continuous EWMA to prevent post-flush zeroing)
+        if hasattr(self.app.flow_manager, 'active_sessions'):
+            n_sess = len(self.app.flow_manager.active_sessions)
+            curr_load = min(n_sess / 8.0, 1.0)
+        elif hasattr(self.app.flow_manager, 'get_active_flow_count'):
             active_flows = self.app.flow_manager.get_active_flow_count()
+            curr_load = min(active_flows / 32.0, 1.0)
         else:
             active_flows = getattr(self.app.flow_manager, 'active_flow_count', 0)
-        active_flows_norm = min(active_flows / 100.0, 1.0)
+            curr_load = min(active_flows / 100.0, 1.0)
+
+        if not hasattr(self, 'load_ewma') or self.load_ewma is None:
+            self.load_ewma = curr_load
+        else:
+            self.load_ewma = 0.7 * self.load_ewma + 0.3 * curr_load
+        active_flows_norm = float(np.clip(self.load_ewma, 0.0, 1.0))
         
         # 8: Target Cardinality (normalized)
         scanned_targets = self.app.threat_detector.get_scanned_targets()
@@ -96,33 +108,31 @@ class MTDEnvironment(gym.Env):
 
     def _calculate_reward(self, action, obs):
         """
-        Unified Multi-Objective Linear Scalarized Reward:
+        Continuous Multi-Objective Linear Scalarized Reward:
         R(s_t, a_t) =
-          0.0                                                           if a_t = 0 and I_t < 0.1
-          -(W_TIME * tau_t + W_RISK * I_t * tau_t)                     if a_t = 0 and I_t >= 0.1
-          W_SEC * I_t * M_a - W_QoS * (D_a * F_t) - W_FLOW * Cost(a_t)  if a_t in {1, 2}
+          0.0                                                           if a_t = 0 and I_t < 0.15
+          -(W_TIME * tau_t + W_RISK * I_t * tau_t)                     if a_t = 0 and I_t >= 0.15
+          W_SEC * I_t * M_a(r) - W_QoS * (D_a * F_t) - W_FLOW * Cost(a_t)  if a_t in {1, 2}
         where:
-          W_SEC = 20.0, W_QoS = 8.0, W_FLOW = 2.0, W_RISK = 25.0, W_TIME = 2.0
-          D_1 = 1.0 (GLOBAL), D_2 = min(|scanned| / 16, 1.0) (TARGETED)
-          When localized (0 < |scanned| <= 4): M_1 = 1.0, M_2 = 2.0, Cost(1) = 1.0, Cost(2) = 0.2
-          When broad (|scanned| > 4): M_1 = 1.8, M_2 = 0.3
+          W_SEC = 20.0, W_QoS = 10.0, W_FLOW = 4.0, W_RISK = 25.0, W_TIME = 2.0
+          r = n_scanned / 16.0 (target scanning ratio, r = 0 if no targets detected)
+          M_2(r) = 2.0 * exp(-2.5 * r) if n_scanned > 0 else 0.0  (defense precision decays continuously)
+          M_1(r) = 1.0 + 1.0 * (1.0 - exp(-3.0 * r)) if n_scanned > 0 else 1.5 (global entropy maximization)
+          Cost(0) = 0.0, Cost(1) = 1.0, Cost(2) = max(0.15, r)
+          D_1 = 1.0, D_2 = r
         """
         I_t = float(obs[4])   # Continuous Threat Intensity (0.0 to 1.0)
         tau_t = float(obs[5]) # Time Staleness (0.0 to 1.0)
         F_t = float(obs[6])   # Active Flows / Network Load (0.0 to 1.0)
 
         if action == 0:
-            if I_t < 0.1:
+            if I_t < 0.15:
                 return 0.0
             return -(self.W_TIME * tau_t + self.W_RISK * I_t * tau_t)
 
         elif action in (1, 2):
-            cost_a = 1.0 if action == 1 else 0.2
-            if I_t < 0.1:
-                return -10.0 - (self.W_FLOW * cost_a)
-
-            scanned_targets = self.app.threat_detector.get_scanned_targets()
             total_hosts = 16.0
+            scanned_targets = self.app.threat_detector.get_scanned_targets() if hasattr(self, 'app') and hasattr(self.app, 'threat_detector') else []
             if scanned_targets:
                 n_scanned = len(scanned_targets)
             elif len(obs) > 7 and obs[7] > 0.0:
@@ -130,21 +140,20 @@ class MTDEnvironment(gym.Env):
             else:
                 n_scanned = 0
 
+            r = float(n_scanned) / total_hosts
+
+            # Continuous multipliers and costs grounded in defense precision and entropy
             if action == 1:  # GLOBAL
+                cost_a = 1.0
                 D_a = 1.0
-                # Maximizes global entropy when multiple hosts/subnets are targeted (> 4 targets)
-                M_a = 1.8 if (n_scanned > 4 or n_scanned == 0) else 1.0
+                M_a = (1.0 + 1.0 * (1.0 - math.exp(-3.0 * r))) if n_scanned > 0 else 1.5
             else:  # TARGETED (action == 2)
-                D_a = min(max(n_scanned, 1) / total_hosts, 1.0)
-                if 0 < n_scanned <= 4:
-                    # High precision bonus for localized attacks (surpasses GLOBAL due to lower churn)
-                    M_a = 2.0
-                elif n_scanned > 4:
-                    # Targeted MTD is ineffective against wide subnet sweeps
-                    M_a = 0.3
-                else:
-                    # No scanned targets identified
-                    M_a = 0.0
+                cost_a = max(0.15, r)
+                D_a = r
+                M_a = (2.0 * math.exp(-2.5 * r)) if n_scanned > 0 else 0.0
+
+            if I_t < 0.15:
+                return -10.0 - (self.W_FLOW * cost_a)
 
             sec_gain = self.W_SEC * I_t * M_a
             return sec_gain - (self.W_QOS * (D_a * F_t)) - (self.W_FLOW * cost_a)

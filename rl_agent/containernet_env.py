@@ -12,6 +12,7 @@ The topology must be started separately with:
 import os
 import sys
 import time
+import math
 import json
 import socket
 import numpy as np
@@ -77,10 +78,11 @@ class ContainernetEnv(gym.Env):
         self.W_TIME = 2.0
         self.W_RISK = 25.0
         self.W_SEC = 20.0
-        self.W_QOS = 8.0
-        self.W_FLOW = 2.0
+        self.W_QOS = 10.0
+        self.W_FLOW = 4.0
         self.W_OVERHEAD = self.W_FLOW
         self.ETA = 0.5
+        self.load_ewma = None
         
         # Scanned targets tracking (from Ryu state)
         self._last_scanned_targets = []
@@ -164,6 +166,7 @@ class ContainernetEnv(gym.Env):
         self.last_shuffle_time = time.time()
         self._last_scanned_targets = []
         self._current_regime = None
+        self.load_ewma = None
         
         print(f"\n{'='*60}")
         print(f"🔄 [ContainernetEnv] Reset (episode {self.episode_count})")
@@ -193,28 +196,33 @@ class ContainernetEnv(gym.Env):
         
         # 1. Execute the agent's action
         if action == 1:
-            print(f"   🎲 Agent chose GLOBAL shuffle (MBB={enable_mbb})")
+            if self.render_mode == "human":
+                print(f"   🎲 Agent chose GLOBAL shuffle (MBB={enable_mbb})")
             self._send_action_to_ryu(1, enable_mbb=enable_mbb)
             self.last_shuffle_time = time.time()
         elif action == 2:
-            print(f"   🎯 Agent chose TARGETED shuffle (MBB={enable_mbb})")
+            if self.render_mode == "human":
+                print(f"   🎯 Agent chose TARGETED shuffle (MBB={enable_mbb})")
             self._send_action_to_ryu(2, enable_mbb=enable_mbb)
             self.last_shuffle_time = time.time()
         else:
-            print(f"   ⏸️  Agent chose HOLD")
+            if self.render_mode == "human":
+                print(f"   ⏸️  Agent chose HOLD")
         
         # 2. Cycle through multi-regime traffic dynamics across realistic horizon
         cycle_step = self.step_count % self.max_steps
         if cycle_step < 5:
             if cycle_step == 0 or self._current_regime != "quiescent":
                 self._current_regime = "quiescent"
-                print(f"   🕊️  [ContainernetEnv] Entering Quiescent Settling Regime (No Attacks)")
+                if self.render_mode == "human":
+                    print(f"   🕊️  [ContainernetEnv] Entering Quiescent Settling Regime (No Attacks)")
                 self._send_command_to_topology({'action': 'stop_attacks'})
                 self._clear_threat_in_ryu()
         elif cycle_step < 11:
             if self._current_regime != "targeted":
                 self._current_regime = "targeted"
-                print(f"   🎯 [ContainernetEnv] Entering Targeted Port-Scan Regime (hosts: 10.0.0.2, 10.0.0.3, ports: 80, 22, 443, 8080, 21)")
+                if self.render_mode == "human":
+                    print(f"   🎯 [ContainernetEnv] Entering Targeted Port-Scan Regime (hosts: 10.0.0.2, 10.0.0.3, ports: 80, 22, 443, 8080, 21)")
                 self._send_command_to_topology({
                     'action': 'attack_targeted',
                     'targets': ['10.0.0.2', '10.0.0.3'],
@@ -223,13 +231,18 @@ class ContainernetEnv(gym.Env):
         elif cycle_step < 15:
             if self._current_regime != "global":
                 self._current_regime = "global"
-                print(f"   ⛈️  [ContainernetEnv] Entering Global Subnet Sweep Regime")
+                if self.render_mode == "human":
+                    print(f"   ⛈️  [ContainernetEnv] Entering Global Subnet Sweep Regime")
                 self._send_command_to_topology({'action': 'attack_arp'})
         else:
             if self._current_regime != "post_quiescent":
                 self._current_regime = "post_quiescent"
-                print(f"   🕊️  [ContainernetEnv] Entering Post-Attack Quiescent Regime (>15s Grace Expiration Window)")
+                if self.render_mode == "human":
+                    print(f"   🕊️  [ContainernetEnv] Entering Post-Attack Quiescent Regime (>15s Grace Expiration Window)")
                 self._send_command_to_topology({'action': 'stop_attacks'})
+                time.sleep(0.3)
+                self._clear_threat_in_ryu()
+            elif cycle_step == 16:
                 self._clear_threat_in_ryu()
         
         # 3. Wait for network dynamics to play out
@@ -270,8 +283,14 @@ class ContainernetEnv(gym.Env):
             time_since = time.time() - self.last_shuffle_time
             time_norm = min(time_since / self.max_shuffle_interval, 1.0)
             
-            # Normalize flows (same as mock)
-            flows_norm = min(flows / 100.0, 1.0)
+            # Active flows / network load with EWMA smoothing (prevents post-flush zeroing)
+            # In Containernet with 16-host fabric, 8 sessions = 32 flows
+            curr_load = min(flows / 32.0, 1.0)
+            if not hasattr(self, 'load_ewma') or self.load_ewma is None:
+                self.load_ewma = curr_load
+            else:
+                self.load_ewma = 0.7 * self.load_ewma + 0.3 * curr_load
+            flows_norm = float(np.clip(self.load_ewma, 0.0, 1.0))
             
             # Target cardinality (index 7)
             scanned = len(self._last_scanned_targets)
@@ -298,39 +317,45 @@ class ContainernetEnv(gym.Env):
     
     def _calculate_reward(self, action, obs):
         """
-        Calculate reward using the EXACT same unified formula as mtd_env.py:
+        Calculate reward using the EXACT same unified continuous formula as mtd_env.py:
         R(s_t, a_t) =
-          0.0                                                           if a_t = 0 and I_t < 0.1
-          -(W_TIME * tau_t + W_RISK * I_t * tau_t)                     if a_t = 0 and I_t >= 0.1
-          W_SEC * I_t * M_a - W_QoS * (D_a * F_t) - W_FLOW * Cost(a_t)  if a_t in {1, 2}
+          0.0                                                           if a_t = 0 and I_t < 0.15
+          -(W_TIME * tau_t + W_RISK * I_t * tau_t)                     if a_t = 0 and I_t >= 0.15
+          W_SEC * I_t * M_a(r) - W_QoS * (D_a * F_t) - W_FLOW * Cost(a_t)  if a_t in {1, 2}
+        where:
+          W_SEC = 20.0, W_QoS = 10.0, W_FLOW = 4.0, W_RISK = 25.0, W_TIME = 2.0
+          r = n_scanned / 16.0 (target scanning ratio, r = 0 if no targets detected)
+          M_2(r) = 2.0 * exp(-2.5 * r) if n_scanned > 0 else 0.0  (defense precision decays continuously)
+          M_1(r) = 1.0 + 1.0 * (1.0 - exp(-3.0 * r)) if n_scanned > 0 else 1.5 (global entropy maximization)
+          Cost(0) = 0.0, Cost(1) = 1.0, Cost(2) = max(0.15, r)
+          D_1 = 1.0, D_2 = r
         """
         I_t = float(obs[4])   # Threat intensity
         tau_t = float(obs[5]) # Time staleness
         F_t = float(obs[6])   # Active flows
         
         if action == 0:
-            if I_t < 0.1:
+            if I_t < 0.15:
                 return 0.0
             return -(self.W_TIME * tau_t + self.W_RISK * I_t * tau_t)
 
         elif action in (1, 2):
-            cost_a = 1.0 if action == 1 else 0.2
-            if I_t < 0.1:
-                return -10.0 - (self.W_FLOW * cost_a)
-
-            scanned = len(self._last_scanned_targets) if self._last_scanned_targets else int(round(float(obs[7]) * 16.0)) if len(obs) > 7 else 0
+            total_hosts = 16.0
+            scanned = len(self._last_scanned_targets) if self._last_scanned_targets else int(round(float(obs[7]) * total_hosts)) if len(obs) > 7 else 0
+            r = float(scanned) / total_hosts
+            
+            # Continuous multipliers and costs grounded in defense precision and entropy
             if action == 1:  # GLOBAL
+                cost_a = 1.0
                 D_a = 1.0
-                M_a = 1.8 if (scanned > 4 or scanned == 0) else 1.0
+                M_a = (1.0 + 1.0 * (1.0 - math.exp(-3.0 * r))) if scanned > 0 else 1.5
             else:  # TARGETED (action == 2)
-                D_a = min(max(scanned, 1) / 16.0, 1.0)
-                if 0 < scanned <= 4:
-                    # Calibrated high reward for targeted shuffling during localized attacks
-                    M_a = 2.0
-                elif scanned > 4:
-                    M_a = 0.3
-                else:
-                    M_a = 0.0
+                cost_a = max(0.15, r)
+                D_a = r
+                M_a = (2.0 * math.exp(-2.5 * r)) if scanned > 0 else 0.0
+
+            if I_t < 0.15:
+                return -10.0 - (self.W_FLOW * cost_a)
 
             sec_gain = self.W_SEC * I_t * M_a
             return sec_gain - (self.W_QOS * (D_a * F_t)) - (self.W_FLOW * cost_a)
@@ -346,7 +371,8 @@ class ContainernetEnv(gym.Env):
                 timeout=5
             )
             if response.status_code == 200:
-                print(f"   ✅ Ryu executed action {action}")
+                if self.render_mode == "human":
+                    print(f"   ✅ Ryu executed action {action}")
             else:
                 print(f"   ❌ Ryu returned {response.status_code}: {response.text}")
         except Exception as e:
@@ -363,7 +389,8 @@ class ContainernetEnv(gym.Env):
             s.close()
             
             if response.get('status') == 'ok':
-                print(f"   ✅ Topology executed: {cmd_dict.get('action')}")
+                if self.render_mode == "human":
+                    print(f"   ✅ Topology executed: {cmd_dict.get('action')}")
             else:
                 print(f"   ❌ Topology error: {response.get('message')}")
             

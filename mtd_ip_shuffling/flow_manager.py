@@ -126,7 +126,9 @@ class FlowManager:
         dst_info = self.app.topology.host_table[real_dst]
         egress_dpid = dst_info['dpid']
         egress_port = dst_info['port']
+        real_mac = dst_info.get('mac')
         virtual_src = self.app.real_to_virtual.get(src_ip, src_ip)
+        virtual_mac = self.app.arp_handler.vip_to_vmac(virtual_dst)
         
         # Track this specific session for the Grace Period with creation timestamp
         now = time.time()
@@ -156,14 +158,17 @@ class FlowManager:
         match_ing = parser.OFPMatch(**match_kwargs)
 
         if ingress_dp.id == egress_dpid:
-            # Intra-leaf: direct output to host port
+            # Intra-leaf: direct output to host port with real MAC rewrite
             out_action = parser.OFPActionOutput(egress_port)
-            actions = [parser.OFPActionSetField(ipv4_dst=real_dst), out_action]
+            actions = [parser.OFPActionSetField(ipv4_dst=real_dst)]
+            if real_mac:
+                actions.append(parser.OFPActionSetField(eth_dst=real_mac))
+            actions.append(out_action)
             self.add_flow(ingress_dp, const.PRIORITY_TRANSLATION, match_ing, actions,
                           idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
                           hard_timeout=hard_timeout, table_id=table_id, cookie=const.COOKIE_MTD_TRANSLATION)
 
-            # Reverse path at ingress
+            # Reverse path at ingress (rewrite eth_src to virtual_mac)
             rev_match_kwargs = {'eth_type': const.ETH_TYPE_IP, 'ipv4_src': real_dst, 'ipv4_dst': src_ip}
             if proto == const.IP_PROTO_TCP and dst_port is not None:
                 rev_match_kwargs['ip_proto'] = const.IP_PROTO_TCP
@@ -175,8 +180,11 @@ class FlowManager:
                 rev_match_kwargs['ip_proto'] = const.IP_PROTO_ICMP
 
             match_rev_src = parser.OFPMatch(**rev_match_kwargs)
-            actions_rev_src = [parser.OFPActionSetField(ipv4_src=virtual_dst),
-                               parser.OFPActionOutput(in_port)]
+            actions_rev_src = [
+                parser.OFPActionSetField(ipv4_src=virtual_dst),
+                parser.OFPActionSetField(eth_src=virtual_mac),
+                parser.OFPActionOutput(in_port)
+            ]
             self.add_flow(ingress_dp, const.PRIORITY_TRANSLATION, match_rev_src, actions_rev_src,
                           idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
                           hard_timeout=hard_timeout, table_id=table_id, cookie=const.COOKIE_MTD_TRANSLATION)
@@ -203,16 +211,19 @@ class FlowManager:
                                   idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
                                   hard_timeout=hard_timeout, table_id=const.TABLE_ACTIVE)
 
-                # 3. Egress Leaf: Deliver to Destination Host port
+                # 3. Egress Leaf: Deliver to Destination Host port (rewrite eth_dst to real_mac)
                 if egress_dp:
                     eg_parser = egress_dp.ofproto_parser
                     match_eg = eg_parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_dst=real_dst)
-                    actions_eg = [eg_parser.OFPActionOutput(egress_port)]
+                    actions_eg = []
+                    if real_mac:
+                        actions_eg.append(eg_parser.OFPActionSetField(eth_dst=real_mac))
+                    actions_eg.append(eg_parser.OFPActionOutput(egress_port))
                     self.add_flow(egress_dp, const.PRIORITY_TRANSLATION, match_eg, actions_eg,
                                   idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
                                   hard_timeout=hard_timeout, table_id=table_id, cookie=const.COOKIE_MTD_TRANSLATION)
 
-                    # Reverse 1: Egress Leaf -> Rewrite real_dst to virtual_dst, output to Spine
+                    # Reverse 1: Egress Leaf -> Rewrite real_dst to virtual_dst, rewrite eth_src to virtual_mac, output to Spine
                     rev_eg_kwargs = {'eth_type': const.ETH_TYPE_IP, 'ipv4_src': real_dst, 'ipv4_dst': src_ip}
                     if proto == const.IP_PROTO_TCP and dst_port is not None:
                         rev_eg_kwargs['ip_proto'] = const.IP_PROTO_TCP
@@ -224,7 +235,11 @@ class FlowManager:
                         rev_eg_kwargs['ip_proto'] = const.IP_PROTO_ICMP
 
                     match_eg_rev = eg_parser.OFPMatch(**rev_eg_kwargs)
-                    actions_eg_rev = [eg_parser.OFPActionSetField(ipv4_src=virtual_dst), eg_parser.OFPActionOutput(port_eg_to_sp)]
+                    actions_eg_rev = [
+                        eg_parser.OFPActionSetField(ipv4_src=virtual_dst),
+                        eg_parser.OFPActionSetField(eth_src=virtual_mac),
+                        eg_parser.OFPActionOutput(port_eg_to_sp)
+                    ]
                     self.add_flow(egress_dp, const.PRIORITY_TRANSLATION, match_eg_rev, actions_eg_rev,
                                   idle_timeout=const.TRANSLATION_FLOW_IDLE_TIMEOUT,
                                   hard_timeout=hard_timeout, table_id=table_id, cookie=const.COOKIE_MTD_TRANSLATION)

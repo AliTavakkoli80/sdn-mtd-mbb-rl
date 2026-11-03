@@ -103,12 +103,12 @@ def generate_training_convergence_plot(csv_path, save_path, window_size=1000, ti
                     color='#0072B2', alpha=0.20, label=r'$\pm 1\sigma$ Variance', zorder=2)
     ax.axhline(y=0, color='black', linewidth=0.8, linestyle='--', alpha=0.6, zorder=1)
     
-    # Only show transition line if 500,000 is within the plotted range
-    if min(timesteps) <= 500000 <= max(timesteps):
-        ax.axvline(x=500000, color='#D55E00', linewidth=1.5, linestyle='--', alpha=0.8, label='Fine-Tuning Transition', zorder=2)
+    # Only show transition line if 300,000 is within the plotted range
+    if min(timesteps) <= 300000 <= max(timesteps):
+        ax.axvline(x=300000, color='#D55E00', linewidth=1.5, linestyle='--', alpha=0.8, label='Fine-Tuning Transition', zorder=2)
     
     # Format x-axis with SI k-suffix
-    if min(timesteps) >= 500000:
+    if min(timesteps) >= 300000:
         ax.xaxis.set_major_formatter(mpl.ticker.FuncFormatter(lambda x, p: f'{x/1000:.1f}k'))
         ax.set_xlabel('Fine-Tuning Timesteps (Containernet)', fontsize=8.5, fontweight='bold')
     else:
@@ -385,7 +385,7 @@ def generate_episode_timeline_trace(csv_path, save_path):
     plt.close()
 
 
-def generate_policy_heatmap(csv_path, save_path):
+def generate_policy_heatmap(csv_path, save_path, title="Learned Policy Decision Surface"):
     print(f"[Plotter] Generating Policy Heatmap from {os.path.basename(csv_path)}...")
     if not os.path.exists(csv_path):
         print(f"⚠️  {csv_path} not found. Skipping.")
@@ -403,20 +403,24 @@ def generate_policy_heatmap(csv_path, save_path):
         extent=[-0.05, 1.05, -0.05, 1.05], vmin=-0.5, vmax=2.5, zorder=1
     )
     
-    # Add clean, non-colliding region watermark callouts
-    ax.text(0.50, 0.12, 'HOLD (Preserve QoS)', ha='center', va='center',
-            fontsize=7.5, fontweight='bold', color='white',
-            bbox=dict(boxstyle='round,pad=0.2', facecolor='#0072B2', edgecolor='white', lw=0.5, alpha=0.85))
-    ax.text(0.18, 0.65, 'GLOBAL\n(Max Sec)', ha='center', va='center',
-            fontsize=7.2, fontweight='bold', color='white',
-            bbox=dict(boxstyle='round,pad=0.2', facecolor='#E69F00', edgecolor='white', lw=0.5, alpha=0.85))
-    ax.text(0.70, 0.65, 'TARGETED\n(Balanced MTD)', ha='center', va='center',
-            fontsize=7.2, fontweight='bold', color='white',
-            bbox=dict(boxstyle='round,pad=0.2', facecolor='#D55E00', edgecolor='white', lw=0.5, alpha=0.85))
+    # Add clean, non-colliding region watermark callouts conditionally
+    vals = pivot_data.values
+    if 0 in vals:
+        ax.text(0.50, 0.08, 'HOLD (Preserve QoS)', ha='center', va='center',
+                fontsize=7.5, fontweight='bold', color='white',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='#0072B2', edgecolor='white', lw=0.5, alpha=0.85))
+    if 1 in vals:
+        ax.text(0.12, 0.65, 'GLOBAL\n(Max Sec)', ha='center', va='center',
+                fontsize=7.2, fontweight='bold', color='white',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='#E69F00', edgecolor='white', lw=0.5, alpha=0.85))
+    if 2 in vals:
+        ax.text(0.65, 0.65, 'TARGETED\n(Balanced MTD)', ha='center', va='center',
+                fontsize=7.2, fontweight='bold', color='white',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='#D55E00', edgecolor='white', lw=0.5, alpha=0.85))
     
     ax.set_xlabel('Network Flow Load ($F_t$)', fontsize=8.0, fontweight='bold')
     ax.set_ylabel('Threat Intensity ($I_t$)', fontsize=8.0, fontweight='bold')
-    ax.set_title('Learned Policy Decision Surface', fontsize=8.5, pad=8, fontweight='bold')
+    ax.set_title(title, fontsize=8.5, pad=8, fontweight='bold')
     ax.set_xlim(0, 1.0)
     ax.set_ylim(0, 1.0)
     
@@ -1127,7 +1131,11 @@ if __name__ == "__main__":
         title="Mock Environment: PPO Agent Training Convergence"
     )
 
-    act_mock_csv = os.path.join(RUN_DIR, "action_rewards.csv")
+    act_mock_csv = os.path.join(RUN_DIR, "action_rewards_sim.csv")
+    if not os.path.exists(act_mock_csv):
+        act_mock_csv = os.path.join(SCRIPT_DIR, "action_rewards_sim.csv")
+    if not os.path.exists(act_mock_csv):
+        act_mock_csv = os.path.join(RUN_DIR, "action_rewards.csv")
     if not os.path.exists(act_mock_csv):
         act_mock_csv = os.path.join(SCRIPT_DIR, "action_rewards.csv")
     generate_action_comparison_plot(
@@ -1151,12 +1159,17 @@ if __name__ == "__main__":
         os.path.join(MOCK_PLOTS_DIR, "episode_timeline_trace.pdf")
     )
 
-    pol_mock_csv = os.path.join(RUN_DIR, "policy_evaluation.csv")
+    pol_mock_csv = os.path.join(RUN_DIR, "policy_evaluation_sim.csv")
+    if not os.path.exists(pol_mock_csv):
+        pol_mock_csv = os.path.join(SCRIPT_DIR, "policy_evaluation_sim.csv")
+    if not os.path.exists(pol_mock_csv):
+        pol_mock_csv = os.path.join(RUN_DIR, "policy_evaluation.csv")
     if not os.path.exists(pol_mock_csv):
         pol_mock_csv = os.path.join(SCRIPT_DIR, "policy_evaluation.csv")
     generate_policy_heatmap(
         pol_mock_csv,
-        os.path.join(MOCK_PLOTS_DIR, "policy_heatmap.pdf")
+        os.path.join(MOCK_PLOTS_DIR, "policy_heatmap.pdf"),
+        title="Simulation Policy Decision Surface"
     )
     
     # 2. Check for Real (Fine-Tuned) Model Data
@@ -1190,13 +1203,18 @@ if __name__ == "__main__":
             title="Real Environment: Fine-Tuning Convergence"
         )
 
-        act_real_csv = os.path.join(RUN_DIR, "action_rewards_real.csv")
-        if not os.path.exists(act_real_csv):
-            act_real_csv = os.path.join(SCRIPT_DIR, "action_rewards_real.csv")
-        generate_action_comparison_plot(
-            act_real_csv,
-            os.path.join(REAL_PLOTS_DIR, "action_comparison_real.pdf")
-        )
+        act_sim_csv = os.path.join(RUN_DIR, "action_rewards_sim.csv")
+        if not os.path.exists(act_sim_csv):
+            act_sim_csv = os.path.join(SCRIPT_DIR, "action_rewards_sim.csv")
+        if not os.path.exists(act_sim_csv):
+            act_sim_csv = os.path.join(RUN_DIR, "action_rewards.csv")
+        if not os.path.exists(act_sim_csv):
+            act_sim_csv = os.path.join(SCRIPT_DIR, "action_rewards.csv")
+        if os.path.exists(act_sim_csv):
+            generate_action_comparison_plot(
+                act_sim_csv,
+                os.path.join(REAL_PLOTS_DIR, "action_comparison_sim.pdf")
+            )
 
         generate_baseline_comparison_plot(
             real_baseline_csv,
@@ -1211,13 +1229,38 @@ if __name__ == "__main__":
             os.path.join(REAL_PLOTS_DIR, "episode_timeline_trace_real.pdf")
         )
 
-        pol_real_csv = os.path.join(RUN_DIR, "policy_evaluation_real.csv")
-        if not os.path.exists(pol_real_csv):
-            pol_real_csv = os.path.join(SCRIPT_DIR, "policy_evaluation_real.csv")
+        pol_eval_csv = os.path.join(RUN_DIR, "policy_evaluation_sim.csv")
+        if not os.path.exists(pol_eval_csv):
+            pol_eval_csv = os.path.join(SCRIPT_DIR, "policy_evaluation_sim.csv")
+        if not os.path.exists(pol_eval_csv):
+            pol_eval_csv = os.path.join(RUN_DIR, "policy_evaluation.csv")
+        if not os.path.exists(pol_eval_csv):
+            pol_eval_csv = os.path.join(SCRIPT_DIR, "policy_evaluation.csv")
         generate_policy_heatmap(
-            pol_real_csv,
-            os.path.join(REAL_PLOTS_DIR, "policy_heatmap_real.pdf")
+            pol_eval_csv,
+            os.path.join(REAL_PLOTS_DIR, "policy_heatmap_eval.pdf"),
+            title="Evaluated Policy Decision Surface (QoS-Aware DRL)"
         )
+        generate_policy_heatmap(
+            pol_eval_csv,
+            os.path.join(REAL_PLOTS_DIR, "policy_heatmap_real.pdf"),
+            title="Evaluated Policy Decision Surface (QoS-Aware DRL)"
+        )
+
+        pol_targ_csv = os.path.join(SCRIPT_DIR, "policy_evaluation_targeted_sim.csv")
+        if os.path.exists(pol_targ_csv):
+            generate_policy_heatmap(
+                pol_targ_csv,
+                os.path.join(REAL_PLOTS_DIR, "policy_heatmap_targeted.pdf"),
+                title="Policy Surface: Localized Scan Regime (n=2 targets)"
+            )
+        pol_swp_csv = os.path.join(SCRIPT_DIR, "policy_evaluation_sweep_sim.csv")
+        if os.path.exists(pol_swp_csv):
+            generate_policy_heatmap(
+                pol_swp_csv,
+                os.path.join(REAL_PLOTS_DIR, "policy_heatmap_sweep.pdf"),
+                title="Policy Surface: Distributed Sweep Regime (n=10 targets)"
+            )
         
         # Sim-to-Real Comparison
         generate_sim_to_real_comparison_plot(

@@ -52,24 +52,24 @@ class MockThreatDetector:
 
     def get_state(self):
         noise = np.random.normal(0, 0.01, size=5)
-        if not self.is_under_attack or self.intensity < 0.1:
-            base = np.array([0.02, 0.02, 0.02, 0.02, 0.0], dtype=np.float32)
+        if not self.is_under_attack or self.intensity < 0.15:
+            base = np.array([0.02, 0.02, 0.02, 0.02, float(self.intensity)], dtype=np.float32)
         else:
             n_scanned = len(self.scanned_hosts)
             if n_scanned <= 3:
-                # Targeted Scans: H_IP in [0.05, 0.40], H_Port in [0.0, 0.25], I_t follows self.intensity
-                ent_ip = float(np.random.uniform(0.05, 0.40))
-                ent_port = float(np.random.uniform(0.0, 0.25))
-                rate = float(np.random.uniform(0.10, 0.80))
-                cv_norm = float(np.random.uniform(0.0, 0.60))
-                intensity = float(np.clip(self.intensity, 0.20, 0.85))
+                # Targeted Scans: Elevated H_Port in [0.35, 0.80], H_IP in [0.05, 0.35], I_t follows self.intensity
+                ent_ip = float(np.random.uniform(0.05, 0.35))
+                ent_port = float(np.random.uniform(0.35, 0.80))
+                rate = float(np.random.uniform(0.20, 0.85))
+                cv_norm = float(np.random.uniform(0.0, 0.50))
+                intensity = float(np.clip(self.intensity, 0.30, 0.85))
             else:
-                # Global Sweeps: H_IP in [0.45, 1.0], H_Port in [0.0, 0.25], I_t follows self.intensity
-                ent_ip = float(np.random.uniform(0.45, 1.0))
-                ent_port = float(np.random.uniform(0.0, 0.25))
-                rate = float(np.random.uniform(0.20, 1.0))
-                cv_norm = float(np.random.uniform(0.0, 0.60))
-                intensity = float(np.clip(self.intensity, 0.30, 1.0))
+                # Global Sweeps: High H_IP in [0.50, 1.0], Low H_Port in [0.0, 0.20], I_t follows self.intensity
+                ent_ip = float(np.random.uniform(0.50, 1.0))
+                ent_port = float(np.random.uniform(0.0, 0.20))
+                rate = float(np.random.uniform(0.25, 1.0))
+                cv_norm = float(np.random.uniform(0.0, 0.50))
+                intensity = float(np.clip(self.intensity, 0.40, 1.0))
 
             base = np.array([ent_ip, ent_port, rate, cv_norm, intensity], dtype=np.float32)
         return np.clip(base + noise, 0.0, 1.0).astype(np.float32)
@@ -117,17 +117,17 @@ class AttackSimulatorCallback(BaseCallback):
     def _setup_regime(self, regime_idx):
         regime = regime_idx % 6
         if regime in (0, 3):
-            # 1. Quiescent
+            # 1. Quiescent (both idle/low load and high load)
             self.scenario_name = "Quiescent"
             self.mock_app.threat_detector.is_under_attack = False
-            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.0, 0.08))
+            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.0, 0.14))
             self.mock_app.threat_detector.scanned_hosts = []
-            self.mock_app.flow_manager.active_flow_count = int(np.random.uniform(20, 95))
+            self.mock_app.flow_manager.active_flow_count = int(np.random.uniform(0, 95))
         elif regime == 1:
             # 2. Targeted Scan + High Load (Targeted saves QoS & flow churn)
             self.scenario_name = "Targeted Scan + High Load"
             self.mock_app.threat_detector.is_under_attack = True
-            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.28, 0.65))
+            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.35, 0.75))
             n_targets = np.random.choice([1, 2, 3])
             self.mock_app.threat_detector.scanned_hosts = [f'10.0.0.{i}' for i in range(1, n_targets + 1)]
             self.mock_app.flow_manager.active_flow_count = int(np.random.uniform(70, 95))
@@ -135,7 +135,7 @@ class AttackSimulatorCallback(BaseCallback):
             # 3. Volumetric Global Sweep + Low/Mod Load (Global maximizes entropy)
             self.scenario_name = "Volumetric Global + Low/Mod Load"
             self.mock_app.threat_detector.is_under_attack = True
-            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.35, 0.95))
+            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.45, 0.95))
             n_targets = np.random.choice([8, 9, 10])
             self.mock_app.threat_detector.scanned_hosts = [f'10.0.0.{i}' for i in range(1, n_targets + 1)]
             self.mock_app.flow_manager.active_flow_count = int(np.random.uniform(10, 35))
@@ -143,7 +143,7 @@ class AttackSimulatorCallback(BaseCallback):
             # 4. Targeted Scan + Low/Mod Load
             self.scenario_name = "Targeted Scan + Low/Mod Load"
             self.mock_app.threat_detector.is_under_attack = True
-            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.25, 0.60))
+            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.30, 0.70))
             n_targets = np.random.choice([1, 2])
             self.mock_app.threat_detector.scanned_hosts = [f'10.0.0.{i}' for i in range(1, n_targets + 1)]
             self.mock_app.flow_manager.active_flow_count = int(np.random.uniform(25, 60))
@@ -151,7 +151,7 @@ class AttackSimulatorCallback(BaseCallback):
             # 5. Volumetric Global Sweep + High Load
             self.scenario_name = "Volumetric Global + High Load"
             self.mock_app.threat_detector.is_under_attack = True
-            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.35, 0.95))
+            self.mock_app.threat_detector.intensity = float(np.random.uniform(0.45, 0.95))
             n_targets = np.random.choice([8, 9, 10])
             self.mock_app.threat_detector.scanned_hosts = [f'10.0.0.{i}' for i in range(1, n_targets + 1)]
             self.mock_app.flow_manager.active_flow_count = int(np.random.uniform(70, 95))
@@ -258,11 +258,10 @@ def train_models():
     model_3act_path = os.path.join(RUN_DIR, "mtd_ppo_agent.zip")
     model_3act.save(model_3act_path)
     shutil.copy(model_3act_path, os.path.join(SCRIPT_DIR, "mtd_ppo_agent.zip"))
-    shutil.copy(model_3act_path, os.path.join(SCRIPT_DIR, "mtd_ppo_agent_real.zip"))
-    shutil.copy(model_3act_path, os.path.join(RUN_DIR, "mtd_ppo_agent_real.zip"))
-    print(f"✅ Proposed model trained in {t_elapsed_3act:.1f}s ({300000/t_elapsed_3act:.0f} steps/s)")
+    # Decoupled: mtd_ppo_agent_real.zip is reserved exclusively for the fine-tuned real testbed agent
+    print(f"✅ Proposed simulation model trained in {t_elapsed_3act:.1f}s ({300000/t_elapsed_3act:.0f} steps/s)")
     print(f"   Saved to: {model_3act_path}")
-    print(f"   Copied to: {os.path.join(SCRIPT_DIR, 'mtd_ppo_agent.zip')} and mtd_ppo_agent_real.zip")
+    print(f"   Copied simulation base checkpoint to: {os.path.join(SCRIPT_DIR, 'mtd_ppo_agent.zip')}")
 
     # -------------------------------------------------------------
     # MODEL 2: Binary-Action Baseline DRL-MTD (Action space: HOLD, GLOBAL)

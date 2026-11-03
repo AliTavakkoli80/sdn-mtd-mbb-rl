@@ -220,6 +220,129 @@ def query_dataplane_telemetry(containers=("mn.h3", "mn.h4", "mn.h7", "mn.h8"),
     }
 
 
+def generate_simulation_eval_artifacts(run_dir=None, model_real=None, real_model_path=None):
+    """
+    Transparent Data Provenance:
+    Generates simulation/analytical MDP evaluation artifacts (strictly labeled with _sim):
+    1. action_rewards_sim.csv: Evaluates scenario rewards across network load and threat regimes.
+    2. policy_evaluation_sim.csv: 2D Pareto decision surface across (I_t, F_t) at multi-objective boundary (n=8, r=0.50).
+    3. policy_evaluation_targeted_sim.csv: 2D surface for localized scan regime (n=2, r=0.125).
+    4. policy_evaluation_sweep_sim.csv: 2D surface for distributed sweep regime (n=10, r=0.625).
+    """
+    run_dir = run_dir or SCRIPT_DIR
+    if model_real is None:
+        if real_model_path is None:
+            real_model_path = os.path.join(SCRIPT_DIR, "mtd_ppo_agent_real.zip")
+            if not os.path.exists(real_model_path):
+                real_model_path = os.path.join(SCRIPT_DIR, "mtd_ppo_agent.zip")
+        print(f"📦 Loading policy model for evaluation: {real_model_path}")
+        model_real = PPO.load(real_model_path, device="cpu")
+
+    from mtd_env import MTDEnvironment
+    from train_agent import MockRyuApp
+    mock_app = MockRyuApp()
+    env_mock = MTDEnvironment(mock_app, render_mode=None)
+
+    # 1. Action Rewards Scenario Evaluation (Simulation MDP)
+    print("\n--- Generating action_rewards_sim.csv (Simulation MDP Evaluation) ---")
+    scenarios = [
+        ("Quiescent (Low Load)", 0.0, 0.20, []),
+        ("Quiescent (High Load)", 0.0, 0.90, []),
+        ("Targeted Exploit (High Load)", 0.90, 0.85, ['10.0.0.2', '10.0.0.3']),
+        ("Volumetric Storm (Low Load)", 0.95, 0.25, [f'10.0.0.{i}' for i in range(1, 11)]),
+        ("Volumetric Storm (High Load)", 0.95, 0.90, [f'10.0.0.{i}' for i in range(1, 11)]),
+    ]
+    rewards_sim = []
+    for sc_name, intensity, load, scanned in scenarios:
+        mock_app.threat_detector.is_under_attack = (intensity > 0.15)
+        mock_app.threat_detector.intensity = intensity
+        mock_app.threat_detector.scanned_hosts = scanned
+        mock_app.flow_manager.active_flow_count = int(load * 100)
+        obs_sc = env_mock._get_obs()
+        obs_sc[5] = 1.0  # full staleness
+        r0 = env_mock._calculate_reward(0, obs_sc)
+        r1 = env_mock._calculate_reward(1, obs_sc)
+        r2 = env_mock._calculate_reward(2, obs_sc)
+        rewards_sim.append({
+            'Scenario': sc_name,
+            'HOLD_Reward': round(r0, 2),
+            'GLOBAL_Reward': round(r1, 2),
+            'TARGETED_Reward': round(r2, 2)
+        })
+    df_rew = pd.DataFrame(rewards_sim)
+    rew_sim_path = os.path.join(run_dir, "action_rewards_sim.csv")
+    df_rew.to_csv(rew_sim_path, index=False)
+    if run_dir != SCRIPT_DIR:
+        df_rew.to_csv(os.path.join(SCRIPT_DIR, "action_rewards_sim.csv"), index=False)
+    print(f"   ✅ Saved: {rew_sim_path}")
+
+    # 2. Canonical 2D Policy Decision Surface Evaluation (n=8 targets, r=0.50)
+    print("--- Generating policy_evaluation_sim.csv (2D Pareto Decision Surface) ---")
+    heatmap_canonical = []
+    for threat in np.linspace(0, 1, 11):
+        for load in np.linspace(0, 1, 11):
+            if threat < 0.15:
+                obs_h = np.array([0.02, 0.02, 0.02, 0.02, threat, 0.5, load, 0.0], dtype=np.float32)
+            else:
+                obs_h = np.array([0.55, 0.20, 0.50, 0.25, threat, 0.5, load, 0.50], dtype=np.float32)
+            act, _ = model_real.predict(obs_h, deterministic=True)
+            heatmap_canonical.append({
+                'Threat_Intensity': round(threat, 2),
+                'Network_Load': round(load, 2),
+                'Action': int(act)
+            })
+    df_hm_canon = pd.DataFrame(heatmap_canonical)
+    hm_sim_path = os.path.join(run_dir, "policy_evaluation_sim.csv")
+    df_hm_canon.to_csv(hm_sim_path, index=False)
+    if run_dir != SCRIPT_DIR:
+        df_hm_canon.to_csv(os.path.join(SCRIPT_DIR, "policy_evaluation_sim.csv"), index=False)
+    print(f"   ✅ Saved: {hm_sim_path}")
+
+    # 3. Dedicated Localized Scan Regime (n=2 targets, r=0.125)
+    print("--- Generating policy_evaluation_targeted_sim.csv (Localized Scan Regime) ---")
+    heatmap_targeted = []
+    for threat in np.linspace(0, 1, 11):
+        for load in np.linspace(0, 1, 11):
+            if threat < 0.15:
+                obs_h = np.array([0.02, 0.02, 0.02, 0.02, threat, 0.5, load, 0.0], dtype=np.float32)
+            else:
+                obs_h = np.array([0.15, 0.60, 0.50, 0.20, threat, 0.5, load, 2.0/16.0], dtype=np.float32)
+            act, _ = model_real.predict(obs_h, deterministic=True)
+            heatmap_targeted.append({
+                'Threat_Intensity': round(threat, 2),
+                'Network_Load': round(load, 2),
+                'Action': int(act)
+            })
+    df_hm_targ = pd.DataFrame(heatmap_targeted)
+    hm_targ_path = os.path.join(run_dir, "policy_evaluation_targeted_sim.csv")
+    df_hm_targ.to_csv(hm_targ_path, index=False)
+    if run_dir != SCRIPT_DIR:
+        df_hm_targ.to_csv(os.path.join(SCRIPT_DIR, "policy_evaluation_targeted_sim.csv"), index=False)
+    print(f"   ✅ Saved: {hm_targ_path}")
+
+    # 4. Dedicated Distributed Sweep Regime (n=10 targets, r=0.625)
+    print("--- Generating policy_evaluation_sweep_sim.csv (Distributed Sweep Regime) ---")
+    heatmap_sweep = []
+    for threat in np.linspace(0, 1, 11):
+        for load in np.linspace(0, 1, 11):
+            if threat < 0.15:
+                obs_h = np.array([0.02, 0.02, 0.02, 0.02, threat, 0.5, load, 0.0], dtype=np.float32)
+            else:
+                obs_h = np.array([0.75, 0.10, 0.60, 0.20, threat, 0.5, load, 10.0/16.0], dtype=np.float32)
+            act, _ = model_real.predict(obs_h, deterministic=True)
+            heatmap_sweep.append({
+                'Threat_Intensity': round(threat, 2),
+                'Network_Load': round(load, 2),
+                'Action': int(act)
+            })
+    df_hm_swp = pd.DataFrame(heatmap_sweep)
+    hm_swp_path = os.path.join(run_dir, "policy_evaluation_sweep_sim.csv")
+    df_hm_swp.to_csv(hm_swp_path, index=False)
+    if run_dir != SCRIPT_DIR:
+        df_hm_swp.to_csv(os.path.join(SCRIPT_DIR, "policy_evaluation_sweep_sim.csv"), index=False)
+    print(f"   ✅ Saved: {hm_swp_path}")
+
+
 def run_evaluation(num_episodes=30, steps_per_episode=42, policies_to_run=None, step_duration=0.6, eval_mode='canonical', mbb_mode=None):
     # Setup runs directory
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -561,75 +684,8 @@ def run_evaluation(num_episodes=30, steps_per_episode=42, policies_to_run=None, 
     df_results.to_csv(os.path.join(SCRIPT_DIR, "baseline_results_real.csv"), index=False)
     print(f"\n✅ Aggregated results saved to:\n   - {v2_run_path}\n   - {v2_root_path}")
 
-    # 4. Generate action_rewards_real_v2.csv
-    print("\n--- Generating action_rewards_real_v2.csv ---")
-    scenarios = [
-        ("Quiescent (Low Load)", 0.0, 0.20, []),
-        ("Quiescent (High Load)", 0.0, 0.90, []),
-        ("Targeted Exploit (High Load)", 0.90, 0.85, ['10.0.0.2']),
-        ("Volumetric Storm (Low Load)", 0.95, 0.25, [f'10.0.0.{i}' for i in range(1, 17)]),
-        ("Volumetric Storm (High Load)", 0.95, 0.90, [f'10.0.0.{i}' for i in range(1, 17)]),
-    ]
-    rewards_v2 = []
-    from mtd_env import MTDEnvironment
-    from train_agent import MockRyuApp
-    mock_app = MockRyuApp()
-    env_mock = MTDEnvironment(mock_app, render_mode=None)
-
-    for sc_name, intensity, load, scanned in scenarios:
-        mock_app.threat_detector.is_under_attack = (intensity > 0.1)
-        mock_app.threat_detector.intensity = intensity
-        mock_app.threat_detector.scanned_hosts = scanned
-        mock_app.flow_manager.active_flow_count = int(load * 100)
-        obs_sc = env_mock._get_obs()
-        obs_sc[5] = 1.0  # full staleness
-        r0 = env_mock._calculate_reward(0, obs_sc)
-        r1 = env_mock._calculate_reward(1, obs_sc)
-        r2 = env_mock._calculate_reward(2, obs_sc)
-        rewards_v2.append({
-            'Scenario': sc_name,
-            'HOLD_Reward': round(r0, 2),
-            'GLOBAL_Reward': round(r1, 2),
-            'TARGETED_Reward': round(r2, 2)
-        })
-    df_rew_v2 = pd.DataFrame(rewards_v2)
-    rew_run_path = os.path.join(run_dir, "action_rewards_real_v2.csv")
-    rew_root_path = os.path.join(SCRIPT_DIR, "action_rewards_real_v2.csv")
-    df_rew_v2.to_csv(rew_run_path, index=False)
-    df_rew_v2.to_csv(rew_root_path, index=False)
-    df_rew_v2.to_csv(os.path.join(run_dir, "action_rewards_real.csv"), index=False)
-    df_rew_v2.to_csv(os.path.join(SCRIPT_DIR, "action_rewards_real.csv"), index=False)
-
-    # 5. Generate policy_evaluation_real_v2.csv
-    print("--- Generating policy_evaluation_real_v2.csv ---")
-    heatmap_v2 = []
-    for threat in np.linspace(0, 1, 11):
-        for load in np.linspace(0, 1, 11):
-            mock_app.threat_detector.intensity = float(threat)
-            if threat <= 0.15:
-                mock_app.threat_detector.is_under_attack = False
-                mock_app.threat_detector.scanned_hosts = []
-            elif threat <= 0.65:
-                mock_app.threat_detector.is_under_attack = True
-                mock_app.threat_detector.scanned_hosts = ['10.0.0.2']
-            else:
-                mock_app.threat_detector.is_under_attack = True
-                mock_app.threat_detector.scanned_hosts = [f'10.0.0.{i}' for i in range(1, 17)]
-            mock_app.flow_manager.active_flow_count = int(load * 100)
-            obs_h = env_mock._get_obs()
-            act, _ = model_real.predict(obs_h, deterministic=True)
-            heatmap_v2.append({
-                'Threat_Intensity': round(threat, 2),
-                'Network_Load': round(load, 2),
-                'Action': int(act)
-            })
-    df_hm_v2 = pd.DataFrame(heatmap_v2)
-    hm_run_path = os.path.join(run_dir, "policy_evaluation_real_v2.csv")
-    hm_root_path = os.path.join(SCRIPT_DIR, "policy_evaluation_real_v2.csv")
-    df_hm_v2.to_csv(hm_run_path, index=False)
-    df_hm_v2.to_csv(hm_root_path, index=False)
-    df_hm_v2.to_csv(os.path.join(run_dir, "policy_evaluation_real.csv"), index=False)
-    df_hm_v2.to_csv(os.path.join(SCRIPT_DIR, "policy_evaluation_real.csv"), index=False)
+    # 4. Generate Simulation Evaluation Artifacts with Transparent Provenance
+    generate_simulation_eval_artifacts(run_dir=run_dir, model_real=model_real, real_model_path=real_model_path)
 
     # 6. Copy latest real DRL trace to episode_trace_real.csv for visualization
     latest_real_trace = os.path.join(run_dir, f"real_eval_raw_real_drl_ep{num_episodes}.csv")
@@ -662,12 +718,16 @@ if __name__ == "__main__":
     parser.add_argument("--policies", type=str, default="all", help="Comma-separated policies or 'all'")
     parser.add_argument("--step-duration", type=float, default=0.6, help="Step duration in seconds (default: 0.6)")
     parser.add_argument("--mode", type=str, default="canonical", choices=["canonical", "factorial"], help="Evaluation mode (canonical or factorial)")
+    parser.add_argument("--artifacts-only", action="store_true", help="Generate simulation evaluation artifacts without running full testbed")
     args = parser.parse_args()
 
-    run_evaluation(
-        num_episodes=args.episodes,
-        steps_per_episode=args.steps,
-        policies_to_run=args.policies,
-        step_duration=args.step_duration,
-        eval_mode=args.mode
-    )
+    if args.artifacts_only:
+        generate_simulation_eval_artifacts(run_dir=SCRIPT_DIR)
+    else:
+        run_evaluation(
+            num_episodes=args.episodes,
+            steps_per_episode=args.steps,
+            policies_to_run=args.policies,
+            step_duration=args.step_duration,
+            eval_mode=args.mode
+        )

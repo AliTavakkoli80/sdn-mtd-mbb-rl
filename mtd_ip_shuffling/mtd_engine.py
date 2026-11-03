@@ -239,8 +239,21 @@ class MTDEngine:
         time_since = time.time() - self.last_shuffle_time
         time_norm = min(time_since / self.max_shuffle_interval, 1.0)
         
-        active_flows = getattr(self.app.flow_manager, 'active_flow_count', 0)
-        active_flows_norm = min(active_flows / 100.0, 1.0)
+        if hasattr(self.app.flow_manager, 'active_sessions'):
+            n_sess = len(self.app.flow_manager.active_sessions)
+            curr_load = min(n_sess / 8.0, 1.0)
+        elif hasattr(self.app.flow_manager, 'get_active_flow_count'):
+            active_flows = self.app.flow_manager.get_active_flow_count()
+            curr_load = min(active_flows / 32.0, 1.0)
+        else:
+            active_flows = getattr(self.app.flow_manager, 'active_flow_count', 0)
+            curr_load = min(active_flows / 100.0, 1.0)
+
+        if not hasattr(self, '_load_ewma') or self._load_ewma is None:
+            self._load_ewma = curr_load
+        else:
+            self._load_ewma = 0.7 * self._load_ewma + 0.3 * curr_load
+        active_flows_norm = float(np.clip(self._load_ewma, 0.0, 1.0))
         
         # 8D: Target Cardinality (normalized)
         scanned_targets = self.app.threat_detector.get_scanned_targets()
@@ -406,17 +419,27 @@ class MTDEngine:
             ofproto = ingress_dp.ofproto
             
             # 1. Ingress Forward: Old Virtual Dst -> Real Dst (Bound to authorized client src_real)
+            vmac_dst = self.app.arp_handler.vip_to_vmac(dst_virt)
             if ingress_dp.id == egress_dp.id:
                 # Intra-leaf
                 out_fwd = parser.OFPActionOutput(dst_info['port'])
                 match = parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_src=src_real, ipv4_dst=dst_virt)
-                actions = [parser.OFPActionSetField(ipv4_dst=dst_real), out_fwd]
+                actions = [parser.OFPActionSetField(ipv4_dst=dst_real)]
+                if dst_info.get('mac'):
+                    actions.append(parser.OFPActionSetField(eth_dst=dst_info['mac']))
+                actions.append(out_fwd)
                 self.app.flow_manager.add_flow(ingress_dp, const.PRIORITY_TRANSLATION, match, actions,
                                               idle_timeout=15, hard_timeout=120, table_id=const.TABLE_GRACE,
                                               cookie=const.COOKIE_MTD_GRACE)
 
                 match_rev = parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_src=dst_real, ipv4_dst=src_real)
-                actions_rev = [parser.OFPActionSetField(ipv4_src=dst_virt), parser.OFPActionOutput(src_info['port'])]
+                actions_rev = [
+                    parser.OFPActionSetField(ipv4_src=dst_virt),
+                    parser.OFPActionSetField(eth_src=vmac_dst),
+                ]
+                if src_info.get('mac'):
+                    actions_rev.append(parser.OFPActionSetField(eth_dst=src_info['mac']))
+                actions_rev.append(parser.OFPActionOutput(src_info['port']))
                 self.app.flow_manager.add_flow(ingress_dp, const.PRIORITY_TRANSLATION, match_rev, actions_rev,
                                               idle_timeout=15, hard_timeout=120, table_id=const.TABLE_GRACE,
                                               cookie=const.COOKIE_MTD_GRACE)
@@ -442,32 +465,42 @@ class MTDEngine:
                         self.app.flow_manager.add_flow(spine_dp, const.PRIORITY_TRANSLATION, match_sp, actions_sp,
                                                       idle_timeout=15, hard_timeout=120, table_id=const.TABLE_ACTIVE)
 
-                    # 3. Egress Leaf (Table 1 Grace): Output to host port
+                    # 3. Egress Leaf (Table 1 Grace): Output to host port with real MAC rewrite
                     e_parser = egress_dp.ofproto_parser
                     match_eg = e_parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_src=src_real, ipv4_dst=dst_real)
-                    actions_eg = [e_parser.OFPActionOutput(dst_info['port'])]
+                    actions_eg = []
+                    if dst_info.get('mac'):
+                        actions_eg.append(e_parser.OFPActionSetField(eth_dst=dst_info['mac']))
+                    actions_eg.append(e_parser.OFPActionOutput(dst_info['port']))
                     self.app.flow_manager.add_flow(egress_dp, const.PRIORITY_TRANSLATION, match_eg, actions_eg,
                                                   idle_timeout=15, hard_timeout=120, table_id=const.TABLE_GRACE,
                                                   cookie=const.COOKIE_MTD_GRACE)
 
-                    # 4. Egress Leaf Reverse: Output to Spine port (match dst_real -> src_real)
+                    # 4. Egress Leaf Reverse: Output to Spine port (match dst_real -> src_real, rewrite eth_src to vmac)
                     match_eg_rev = e_parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_src=dst_real, ipv4_dst=src_real)
-                    actions_eg_rev = [e_parser.OFPActionSetField(ipv4_src=dst_virt), e_parser.OFPActionOutput(port_eg_to_sp)]
+                    actions_eg_rev = [
+                        e_parser.OFPActionSetField(ipv4_src=dst_virt),
+                        e_parser.OFPActionSetField(eth_src=vmac_dst),
+                        e_parser.OFPActionOutput(port_eg_to_sp)
+                    ]
                     self.app.flow_manager.add_flow(egress_dp, const.PRIORITY_TRANSLATION, match_eg_rev, actions_eg_rev,
                                                   idle_timeout=15, hard_timeout=120, table_id=const.TABLE_GRACE,
                                                   cookie=const.COOKIE_MTD_GRACE)
 
-                    # 5. Spine switch Reverse: Transit forward to Ingress Leaf
+                    # 5. Spine switch Reverse: Transit forward to Ingress Leaf (2-endpoint match)
                     if spine_dp:
                         sp_parser = spine_dp.ofproto_parser
-                        match_sp_rev = sp_parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_dst=src_real)
+                        match_sp_rev = sp_parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_src=dst_virt, ipv4_dst=src_real)
                         actions_sp_rev = [sp_parser.OFPActionOutput(port_sp_to_in)]
                         self.app.flow_manager.add_flow(spine_dp, const.PRIORITY_TRANSLATION, match_sp_rev, actions_sp_rev,
                                                       idle_timeout=15, hard_timeout=120, table_id=const.TABLE_ACTIVE)
 
-                    # 6. Ingress Leaf Reverse: Output to source host port
-                    match_in_rev = parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_dst=src_real)
-                    actions_in_rev = [parser.OFPActionSetField(ipv4_src=dst_virt), parser.OFPActionOutput(src_info['port'])]
+                    # 6. Ingress Leaf Reverse: Output to source host port (precise 2-endpoint match)
+                    match_in_rev = parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_src=dst_virt, ipv4_dst=src_real)
+                    actions_in_rev = []
+                    if src_info.get('mac'):
+                        actions_in_rev.append(parser.OFPActionSetField(eth_dst=src_info['mac']))
+                    actions_in_rev.append(parser.OFPActionOutput(src_info['port']))
                     self.app.flow_manager.add_flow(ingress_dp, const.PRIORITY_TRANSLATION, match_in_rev, actions_in_rev,
                                                   idle_timeout=15, hard_timeout=120, table_id=const.TABLE_GRACE,
                                                   cookie=const.COOKIE_MTD_GRACE)

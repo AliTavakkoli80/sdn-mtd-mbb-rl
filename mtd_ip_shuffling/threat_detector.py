@@ -57,7 +57,8 @@ class ThreatDetector:
         return src['ewma_rate']
 
     def _update_source(self, src_ip, dst_ip, dst_port, timestamp):
-        if src_ip == self.app.dns_ip:
+        dns_ip = getattr(self.app, 'dns_ip', '10.0.0.254')
+        if src_ip == dns_ip:
             return
             
         if timestamp is None:
@@ -80,13 +81,18 @@ class ThreatDetector:
             src['ewma_rate'] = 1.0 / self.RATE_TAU
 
         src['last_ts'] = timestamp
-        src['dst_ips'].add(dst_ip)
-        src['recent_dst_ips'].append(dst_ip)
-        if dst_port is not None:
+
+        # Protocol coexistence: Only record protected target IPs/ports for threat entropy.
+        # Concurrent DNS port 53 queries by local carrier hosts must not inflate threat scores.
+        if dst_ip != dns_ip:
+            src['dst_ips'].add(dst_ip)
+            src['recent_dst_ips'].append(dst_ip)
+
+        if dst_port is not None and dst_port != 53:
             is_new_port = dst_port not in src['dst_ports']
             src['dst_ports'].add(dst_port)
             src['recent_dst_ports'].append(dst_port)
-            if is_new_port and len(src['dst_ports']) > 1:
+            if is_new_port and len(src['dst_ports']) >= 4:
                 h_port = self._calculate_empirical_shannon_entropy(src['recent_dst_ports'], capacity=50)
                 self.app.logger.info(
                     f"🔍 [L4 Telemetry] Multi-port probe detected from {src_ip} -> port {dst_port} "
@@ -98,7 +104,7 @@ class ThreatDetector:
             self._cleanup_stale_sources()
             self.last_cleanup = time.time()
             
-        score = self._compute_threat_score(src, timestamp)
+        score = self._evaluate_threat(src, timestamp)
         
         # Track peak score and time
         if score > src['peak_score']:
@@ -143,18 +149,27 @@ class ThreatDetector:
             return 0.0
         return min(max(h / denom, 0.0), 1.0)
 
-    def _compute_threat_score(self, src: dict, now: float = None) -> float:
+    def _evaluate_threat(self, src: dict, now: float = None) -> float:
         """
         Returns a normalized threat score [0.0, 1.0] using dual-signal detection:
         1. Global-sweep signal (information-theoretic entropy across broad IP/port space)
-        2. Targeted-burst signal (focused probing of 1-3 targets with elevated packet rate)
+        2. Targeted-burst signal (authentic vertical reconnaissance or focused 2-3 target horizontal probes)
         """
+        dns_ip = getattr(self.app, 'dns_ip', '10.0.0.254')
+        effective_ips = [ip for ip in src['recent_dst_ips'] if ip != dns_ip]
+        if not effective_ips and src['dst_ips']:
+            effective_ips = [ip for ip in src['dst_ips'] if ip != dns_ip]
+            
+        effective_ports = [p for p in src['recent_dst_ports'] if p != 53]
+        if not effective_ports and src['dst_ports']:
+            effective_ports = [p for p in src['dst_ports'] if p != 53]
+
         # A. True Empirical Shannon Entropy for Destination IPs
         num_protected = len(self.app.real_to_virtual) if (hasattr(self.app, 'real_to_virtual') and len(self.app.real_to_virtual) > 1) else 16
-        ent_ip_norm = self._calculate_empirical_shannon_entropy(src['recent_dst_ips'], capacity=num_protected)
+        ent_ip_norm = self._calculate_empirical_shannon_entropy(effective_ips, capacity=num_protected)
             
         # B. True Empirical Shannon Entropy for Destination Ports
-        ent_port_norm = self._calculate_empirical_shannon_entropy(src['recent_dst_ports'], capacity=50)
+        ent_port_norm = self._calculate_empirical_shannon_entropy(effective_ports, capacity=50)
         
         # C. IAT Coefficient of Variation
         cv = 1.0
@@ -169,27 +184,35 @@ class ThreatDetector:
         rate = self._get_current_rate(src, now)
         rate_norm = min(rate / self.RATE_THRESHOLD, 1.0)
         
-        # Base entropy score
-        entropy_score = (0.50 * ent_ip_norm) + (0.20 * ent_port_norm) + (0.10 * cv_norm) + (0.20 * rate_norm)
+        # Base entropy score with activity gating for quiescent decay
+        activity_gate = min(rate / 0.5, 1.0) if rate < 0.5 else 1.0
+        entropy_score = ((0.50 * ent_ip_norm) + (0.20 * ent_port_norm) + (0.10 * cv_norm) + (0.20 * rate_norm)) * activity_gate
         
-        # Dual-signal: targeted-burst signal (scanning multiple targets or scanning multiple ports)
-        # Legitimate single point-to-point flows have n_ips == 1 and n_ports <= 1.
-        n_ips = len(set(src['recent_dst_ips'])) if src['recent_dst_ips'] else len(src['dst_ips'])
-        n_ports = len(set(src['recent_dst_ports'])) if src['recent_dst_ports'] else len(src['dst_ports'])
+        # Dual-signal: targeted-burst signal
+        # Benign dual-socket flows (e.g. DNS port 53 alongside TCP 5201, or dual application sockets)
+        # must NOT trigger targeted alert. Require authentic vertical reconnaissance (n_ports >= 4 or H_port >= 0.35)
+        # or targeted horizontal probing across 2-3 protected targets with sustained continuous rate >= 1.0 pps.
+        n_ips = len(set(effective_ips))
+        n_ports = len(set(effective_ports))
+        is_vertical_recon = (n_ports >= 4 or ent_port_norm >= 0.35)
+        is_targeted_horizontal = (2 <= n_ips <= 3)
         is_targeted = (
-            ((2 <= n_ips <= 3) or (n_ips >= 1 and n_ports > 1))
-            and rate >= 0.8
+            (is_vertical_recon or is_targeted_horizontal)
+            and rate >= 1.0
             and cv < 1.25
         )
         
         if is_targeted:
-            # Map rate so >= 0.8 pps reaches >= 0.65, scaling up to 0.95
-            targeted_score = min(0.65 + max(0.0, rate - 0.8) / 8.0, 0.95)
+            # Map rate so >= 1.0 pps reaches >= 0.65, scaling up to 0.95
+            targeted_score = min(0.65 + max(0.0, rate - 1.0) / 8.0, 0.95)
             score = max(entropy_score, targeted_score)
         else:
             score = entropy_score
 
         return min(score, 1.0)
+
+    # Alias for backward-compatibility
+    _compute_threat_score = _evaluate_threat
 
     def _cleanup_stale_sources(self):
         now = time.time()
@@ -205,10 +228,18 @@ class ThreatDetector:
         max_ent_ip, max_ent_port, max_rate, max_cv = 0.0, 0.0, 0.0, 0.0
         now = time.time()
         num_protected = len(self.app.real_to_virtual) if (hasattr(self.app, 'real_to_virtual') and len(self.app.real_to_virtual) > 1) else 16
+        dns_ip = getattr(self.app, 'dns_ip', '10.0.0.254')
         
         for src in self.sources.values():
-            e_ip = self._calculate_empirical_shannon_entropy(src['recent_dst_ips'], capacity=num_protected)
-            e_port = self._calculate_empirical_shannon_entropy(src['recent_dst_ports'], capacity=50)
+            effective_ips = [ip for ip in src['recent_dst_ips'] if ip != dns_ip]
+            if not effective_ips and src['dst_ips']:
+                effective_ips = [ip for ip in src['dst_ips'] if ip != dns_ip]
+            effective_ports = [p for p in src['recent_dst_ports'] if p != 53]
+            if not effective_ports and src['dst_ports']:
+                effective_ports = [p for p in src['dst_ports'] if p != 53]
+
+            e_ip = self._calculate_empirical_shannon_entropy(effective_ips, capacity=num_protected)
+            e_port = self._calculate_empirical_shannon_entropy(effective_ports, capacity=50)
             rate = min(self._get_current_rate(src, now) / self.RATE_THRESHOLD, 1.0)
             
             if len(src['iat_list']) >= 5:
@@ -233,21 +264,32 @@ class ThreatDetector:
     def get_scanned_targets(self):
         """
         Returns a list of Virtual IPs/hosts currently being targeted by the most aggressive scanner.
-        Returns hosts whose score exceeds 0.40 OR whose rate exceeds 3.0 during a targeted burst.
+        Returns hosts whose score exceeds 0.40 OR whose rate exceeds 1.0 during a targeted burst.
         """
+        dns_ip = getattr(self.app, 'dns_ip', '10.0.0.254')
         max_score = 0.0
         top_targets = []
         now = time.time()
         
         for src_ip, data in self.sources.items():
-            score = self._compute_threat_score(data, now)
-            n_ips = len(set(data['recent_dst_ips'])) if data['recent_dst_ips'] else len(data['dst_ips'])
-            n_ports = len(set(data['recent_dst_ports'])) if data['recent_dst_ports'] else len(data['dst_ports'])
+            score = self._evaluate_threat(data, now)
+            effective_ips = [ip for ip in data['recent_dst_ips'] if ip != dns_ip]
+            if not effective_ips and data['dst_ips']:
+                effective_ips = [ip for ip in data['dst_ips'] if ip != dns_ip]
+            effective_ports = [p for p in data['recent_dst_ports'] if p != 53]
+            if not effective_ports and data['dst_ports']:
+                effective_ports = [p for p in data['dst_ports'] if p != 53]
+
+            n_ips = len(set(effective_ips))
+            n_ports = len(set(effective_ports))
+            ent_port_norm = self._calculate_empirical_shannon_entropy(effective_ports, capacity=50)
             rate = self._get_current_rate(data, now)
-            is_targeted_burst = (((2 <= n_ips <= 3) or (n_ips >= 1 and n_ports > 1)) and rate >= 0.8)
+            is_vertical_recon = (n_ports >= 4 or ent_port_norm >= 0.35)
+            is_targeted_horizontal = (2 <= n_ips <= 3)
+            is_targeted_burst = ((is_vertical_recon or is_targeted_horizontal) and rate >= 1.0)
             if (score >= self.ATTACK_THRESHOLD or is_targeted_burst) and score >= max_score: 
                 max_score = score
-                top_targets = list(set(data['recent_dst_ips'])) if data['recent_dst_ips'] else list(data['dst_ips'])
+                top_targets = list(set(effective_ips))
                 
         return top_targets    
 
@@ -257,7 +299,7 @@ class ThreatDetector:
         current_time = time.time()
         
         for data in self.sources.values():
-            score = self._compute_threat_score(data, current_time)
+            score = self._evaluate_threat(data, current_time)
             
             # Apply threat memory - use peak score if recent
             time_since_peak = current_time - data['peak_time']
@@ -277,6 +319,6 @@ class ThreatDetector:
         now = time.time()
         flagged = set()
         for src_ip, data in self.sources.items():
-            if self._compute_threat_score(data, now) >= self.ATTACK_THRESHOLD or data.get('is_flagged', False):
+            if self._evaluate_threat(data, now) >= self.ATTACK_THRESHOLD or data.get('is_flagged', False):
                 flagged.add(src_ip)
         return flagged

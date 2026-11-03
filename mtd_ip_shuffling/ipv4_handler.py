@@ -2,6 +2,7 @@ from ryu.lib.packet import packet, ethernet, ipv4, tcp, udp
 from . import constants as const
 from dnslib import DNSRecord, QTYPE, A
 import socket
+import struct
 
 class IPv4Handler:
     def __init__(self, app):
@@ -56,8 +57,15 @@ class IPv4Handler:
         parser = datapath.ofproto_parser
         ofproto = datapath.ofproto
         dpid, out_port = self.app.topology.get_host_location_by_ip(real_dst)
+        dst_info = self.app.topology.host_table.get(real_dst)
+        real_mac = dst_info.get('mac') if dst_info else None
+
         if dpid == datapath.id and out_port is not None:
             out_action = parser.OFPActionOutput(out_port)
+            actions = [parser.OFPActionSetField(ipv4_dst=real_dst)]
+            if real_mac:
+                actions.append(parser.OFPActionSetField(eth_dst=real_mac))
+            actions.append(out_action)
         else:
             route = self.app.topology.get_inter_switch_route(datapath.id, dpid, flow_key=real_dst)
             if route and route[1] is not None:
@@ -65,10 +73,10 @@ class IPv4Handler:
             else:
                 self.app.logger.warning(f"[mtd] No inter-switch route found from S{datapath.id} to S{dpid} for {real_dst}")
                 return
-        actions = [
-            parser.OFPActionSetField(ipv4_dst=real_dst),
-            out_action
-        ]
+            actions = [
+                parser.OFPActionSetField(ipv4_dst=real_dst),
+                out_action
+            ]
         out = parser.OFPPacketOut(
             datapath=datapath,
             buffer_id=buffer_id,
@@ -95,40 +103,47 @@ class IPv4Handler:
                 self._send_dns_packet(datapath, in_port, client_ip, bytes(raw_data))
                 return
 
-            # 2. Parse the DNS payload
-            dns_payload = bytearray(raw_data[dns_start:])
-            dns_resp = DNSRecord.parse(bytes(dns_payload))
+            # 2. Parse the DNS payload cleanly via dnslib
+            dns_payload = bytes(raw_data[dns_start:])
+            dns_resp = DNSRecord.parse(dns_payload)
 
             if not (dns_resp.header.qr == 1 and dns_resp.rr):
                 self._send_dns_packet(datapath, in_port, client_ip, bytes(raw_data))
                 return
 
+            # 3. Structured Record Modification: Modify in-place via parsed dnslib RR records
             modified = False
             for rr in dns_resp.rr:
                 if rr.rtype == QTYPE.A and isinstance(rr.rdata, A):
                     real_ip = str(rr.rdata)
                     if real_ip in self.app.real_to_virtual:
                         virt_ip = self.app.real_to_virtual[real_ip]
-                        
-                        # Find and replace the exact 4 bytes in the payload
-                        real_bytes = socket.inet_aton(real_ip)
-                        virt_bytes = socket.inet_aton(virt_ip)
-                        
-                        idx = dns_payload.find(real_bytes)
-                        if idx != -1:
-                            dns_payload[idx:idx+4] = virt_bytes
-                            modified = True
-                            self.app.logger.info(f"[dns] {real_ip} → {virt_ip}")
+                        rr.rdata = A(virt_ip)
+                        modified = True
+                        self.app.logger.info(f"[dns] {real_ip} → {virt_ip}")
 
             if not modified:
                 self._send_dns_packet(datapath, in_port, client_ip, bytes(raw_data))
                 return
 
-            # 3. Splice the modified DNS payload back into the original raw packet
-            patched_raw_data = bytearray(raw_data)
-            patched_raw_data[dns_start:dns_start+len(dns_payload)] = dns_payload
+            # 4. Cleanly serialize modified DNS wire-format payload
+            new_dns_payload = dns_resp.pack()
 
-            # 4. Recalculate the IP Header Checksum (RFC 1071)
+            # 5. Reconstruct packet with updated UDP & IP header lengths
+            new_udp_len = len(new_dns_payload) + 8
+            new_ip_total_len = ip_hdr_len + new_udp_len
+
+            patched_raw_data = bytearray(raw_data[:dns_start]) + bytearray(new_dns_payload)
+
+            # Update IPv4 Total Length (bytes ip_start + 2 and ip_start + 3)
+            patched_raw_data[ip_start + 2] = (new_ip_total_len >> 8) & 0xff
+            patched_raw_data[ip_start + 3] = new_ip_total_len & 0xff
+
+            # Update UDP Length (bytes udp_start + 4 and udp_start + 5)
+            patched_raw_data[udp_start + 4] = (new_udp_len >> 8) & 0xff
+            patched_raw_data[udp_start + 5] = new_udp_len & 0xff
+
+            # 6. Recalculate IPv4 Header Checksum (RFC 1071)
             patched_raw_data[ip_start + 10] = 0  # Zero out old checksum
             patched_raw_data[ip_start + 11] = 0
             
@@ -140,19 +155,42 @@ class IPv4Handler:
             for i in range(0, len(ip_header), 2):
                 w = (ip_header[i] << 8) + ip_header[i+1]
                 s += w
-            s = (s >> 16) + (s & 0xffff)
-            s += (s >> 16)
+            while s >> 16:
+                s = (s >> 16) + (s & 0xffff)
             new_csum = (~s) & 0xffff
             
             patched_raw_data[ip_start + 10] = (new_csum >> 8) & 0xff
             patched_raw_data[ip_start + 11] = new_csum & 0xff
 
-            # 5. Force UDP Checksum to 0 (Valid for IPv4, prevents Linux kernel from dropping)
+            # 7. Recalculate UDP Checksum over IPv4 pseudo-header (RFC 768 / RFC 1071)
             udp_csum_offset = udp_start + 6
             patched_raw_data[udp_csum_offset] = 0
             patched_raw_data[udp_csum_offset + 1] = 0
+            try:
+                src_ip_bytes = socket.inet_aton(ipv4_pkt.src)
+                dst_ip_bytes = socket.inet_aton(ipv4_pkt.dst)
+                # Pseudo-header: src_ip (4B) + dst_ip (4B) + 0x00 (1B) + proto 17 (1B) + udp_len (2B)
+                pseudo_hdr = src_ip_bytes + dst_ip_bytes + struct.pack('!BBH', 0, const.IP_PROTO_UDP, new_udp_len)
+                udp_data = pseudo_hdr + bytes(patched_raw_data[udp_start:])
+                if len(udp_data) % 2 == 1:
+                    udp_data += b'\x00'
+                u_s = 0
+                for i in range(0, len(udp_data), 2):
+                    w = (udp_data[i] << 8) + udp_data[i+1]
+                    u_s += w
+                while u_s >> 16:
+                    u_s = (u_s >> 16) + (u_s & 0xffff)
+                udp_csum = (~u_s) & 0xffff
+                if udp_csum == 0:
+                    udp_csum = 0xffff
+                patched_raw_data[udp_csum_offset] = (udp_csum >> 8) & 0xff
+                patched_raw_data[udp_csum_offset + 1] = udp_csum & 0xff
+            except Exception as e_csum:
+                self.app.logger.warning(f"[dns] UDP checksum fallback to 0x0000: {e_csum}")
+                patched_raw_data[udp_csum_offset] = 0
+                patched_raw_data[udp_csum_offset + 1] = 0
 
-            # 6. Deliver the modified DNS packet directly to the destination client
+            # 8. Deliver the modified DNS packet directly to the destination client
             self._send_dns_packet(datapath, in_port, client_ip, bytes(patched_raw_data))
 
         except Exception as e:
