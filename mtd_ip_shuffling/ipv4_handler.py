@@ -119,8 +119,9 @@ class IPv4Handler:
                     if real_ip in self.app.real_to_virtual:
                         virt_ip = self.app.real_to_virtual[real_ip]
                         rr.rdata = A(virt_ip)
+                        rr.ttl = min(int(rr.ttl), 5)  # Enforce max 5s resolver cache ceiling
                         modified = True
-                        self.app.logger.info(f"[dns] {real_ip} → {virt_ip}")
+                        self.app.logger.info(f"[dns] {real_ip} → {virt_ip} (TTL clamped to {rr.ttl}s)")
 
             if not modified:
                 self._send_dns_packet(datapath, in_port, client_ip, bytes(raw_data))

@@ -275,6 +275,15 @@ class MTDMovingTargetDefense(app_manager.RyuApp):
         """Tracks active flows for the RL agent's QoS cost metric with ZERO polling overhead."""
         self.flow_manager.active_flow_count = max(0, self.flow_manager.active_flow_count - 1)
         msg = ev.msg
+        match = msg.match
+        ipv4_src = match.get('ipv4_src')
+        ipv4_dst = match.get('ipv4_dst')
+        if ipv4_src and ipv4_dst:
+            if (ipv4_src, ipv4_dst) in self.flow_manager.active_sessions:
+                del self.flow_manager.active_sessions[(ipv4_src, ipv4_dst)]
+            elif hasattr(self.flow_manager, 'remove_session'):
+                self.flow_manager.remove_session(ipv4_src, ipv4_dst)
+
         if msg.table_id == const.TABLE_GRACE or msg.cookie == const.COOKIE_MTD_GRACE:
             self.logger.info(
                 f"🧹 [OVS Datapath] Table 1 Grace Flow expired on S{msg.datapath.id} "

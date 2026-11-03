@@ -294,7 +294,10 @@ class ContainernetEnv(gym.Env):
             
             # Target cardinality (index 7)
             scanned = len(self._last_scanned_targets)
-            scanned_norm = min(scanned / 16.0, 1.0)
+            mapping = data.get('real_to_virtual', {})
+            total_hosts = float(len(mapping)) if (mapping and len(mapping) > 0) else getattr(self, '_total_hosts', 16.0)
+            self._total_hosts = total_hosts
+            scanned_norm = min(scanned / total_hosts, 1.0)
             
             # Construct 8D vector (MUST match mtd_env.py _get_obs() exactly!)
             obs = np.array([
@@ -340,7 +343,7 @@ class ContainernetEnv(gym.Env):
             return -(self.W_TIME * tau_t + self.W_RISK * I_t * tau_t)
 
         elif action in (1, 2):
-            total_hosts = 16.0
+            total_hosts = getattr(self, '_total_hosts', 16.0)
             scanned = len(self._last_scanned_targets) if self._last_scanned_targets else int(round(float(obs[7]) * total_hosts)) if len(obs) > 7 else 0
             r = float(scanned) / total_hosts
             

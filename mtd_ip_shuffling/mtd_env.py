@@ -97,7 +97,7 @@ class MTDEnvironment(gym.Env):
         # 8: Target Cardinality (normalized)
         scanned_targets = self.app.threat_detector.get_scanned_targets()
         n_scanned = len(scanned_targets) if scanned_targets else 0
-        total_hosts = 16.0
+        total_hosts = float(len(self.app.real_to_virtual)) if (hasattr(self, 'app') and hasattr(self.app, 'real_to_virtual') and len(self.app.real_to_virtual) > 0) else 16.0
         scanned_norm = min(n_scanned / total_hosts, 1.0)
         
         # Construct the unified 8D vector
@@ -131,7 +131,7 @@ class MTDEnvironment(gym.Env):
             return -(self.W_TIME * tau_t + self.W_RISK * I_t * tau_t)
 
         elif action in (1, 2):
-            total_hosts = 16.0
+            total_hosts = float(len(self.app.real_to_virtual)) if (hasattr(self, 'app') and hasattr(self.app, 'real_to_virtual') and len(self.app.real_to_virtual) > 0) else 16.0
             scanned_targets = self.app.threat_detector.get_scanned_targets() if hasattr(self, 'app') and hasattr(self.app, 'threat_detector') else []
             if scanned_targets:
                 n_scanned = len(scanned_targets)

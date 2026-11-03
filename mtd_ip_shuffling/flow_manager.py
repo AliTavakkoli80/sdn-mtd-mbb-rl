@@ -24,7 +24,33 @@ class FlowManager:
         ]
         for k in expired_keys:
             del self.active_sessions[k]
-        return len(expired_keys) 
+        return len(expired_keys)
+
+    def remove_session(self, ipv4_src, ipv4_dst):
+        """
+        Removes matching active session entries when a flow removal notification is received from the datapath.
+        Handles direct matches as well as translated virtual-to-real IP lookups.
+        """
+        if not ipv4_src or not ipv4_dst:
+            return False
+
+        removed = False
+        if (ipv4_src, ipv4_dst) in self.active_sessions:
+            del self.active_sessions[(ipv4_src, ipv4_dst)]
+            removed = True
+
+        v2r = getattr(self.app, 'virtual_to_real', {})
+        real_src = v2r.get(ipv4_src, ipv4_src)
+        real_dst = v2r.get(ipv4_dst, ipv4_dst)
+
+        for candidate in [(real_src, real_dst), (real_src, ipv4_dst), (ipv4_src, real_dst)]:
+            if candidate in self.active_sessions:
+                del self.active_sessions[candidate]
+                removed = True
+
+        if removed:
+            self.app.logger.debug(f"[flow] Synchronized active session removal for ({ipv4_src}, {ipv4_dst})")
+        return removed 
 
     def add_flow(self, datapath, priority, match, actions, buffer_id=None,
                  idle_timeout=0, hard_timeout=0, table_id=0, cookie=0):
