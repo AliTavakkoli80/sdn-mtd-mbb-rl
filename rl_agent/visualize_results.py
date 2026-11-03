@@ -71,8 +71,20 @@ def get_latest_run_dir():
 # PLOT GENERATORS
 # ==========================================
 
+def smooth_series_gaussian(y, sigma=25):
+    """Applies pure numpy Gaussian smoothing with edge reflection padding."""
+    radius = int(3 * sigma)
+    if len(y) <= radius * 2:
+        return pd.Series(y).rolling(window=max(3, len(y)//10), center=True).mean().bfill().ffill().values
+    x = np.arange(-radius, radius + 1)
+    kernel = np.exp(-0.5 * (x / sigma) ** 2)
+    kernel /= kernel.sum()
+    padded = np.pad(y, radius, mode='edge')
+    return np.convolve(padded, kernel, mode='valid')
+
+
 def generate_training_convergence_plot(csv_path, save_path, window_size=1000, title="PPO Agent Training Convergence"):
-    """Generates convergence curve with dynamic window size."""
+    """Generates convergence curve with spline/gaussian smoothing and vector-optimized decimation."""
     print(f"[Plotter] Generating Convergence Curve from {os.path.basename(csv_path)}...")
     if not os.path.exists(csv_path):
         print(f"⚠️  {csv_path} not found. Skipping.")
@@ -85,21 +97,34 @@ def generate_training_convergence_plot(csv_path, save_path, window_size=1000, ti
 
     timesteps = df['timestep'].values
     rewards = df['reward'].values
-    
-    actual_window = min(window_size, len(rewards))
-    if actual_window > 1:
-        rolling_mean = pd.Series(rewards).rolling(window=actual_window, center=True).mean()
-        rolling_std = pd.Series(rewards).rolling(window=actual_window, center=True).std()
+    n_points = len(rewards)
+
+    # Adaptive smoothing and decimation for vector fidelity
+    if n_points < 10000:
+        # Fine-tuning trajectory: apply Gaussian kernel smoothing for continuous C^inf curve
+        sigma = max(10, n_points // 150)
+        smooth_mean = smooth_series_gaussian(rewards, sigma=sigma)
+        smooth_sq = smooth_series_gaussian(rewards**2, sigma=sigma)
+        smooth_var = np.maximum(0, smooth_sq - smooth_mean**2)
+        smooth_std = np.sqrt(smooth_var)
+        plot_t = timesteps
+        plot_m = smooth_mean
+        plot_s = smooth_std
+        mean_label = 'Fine-Tuning Convergence Trajectory'
     else:
-        rolling_mean = pd.Series(rewards)
-        rolling_std = pd.Series(np.zeros_like(rewards))
-    
-    rolling_mean = rolling_mean.bfill().ffill()
-    rolling_std = rolling_std.fillna(0)
+        # Long training run (e.g. 300,000 steps): compute centered rolling mean, then decimate for vector PDF fidelity
+        actual_window = min(window_size, n_points)
+        rolling_mean = pd.Series(rewards).rolling(window=actual_window, center=True).mean().bfill().ffill().values
+        rolling_std = pd.Series(rewards).rolling(window=actual_window, center=True).std().fillna(0).values
+        stride = max(1, n_points // 1500)
+        plot_t = timesteps[::stride]
+        plot_m = rolling_mean[::stride]
+        plot_s = rolling_std[::stride]
+        mean_label = f'Rolling Mean ({actual_window} steps)'
     
     fig, ax = plt.subplots(figsize=(IEEE_DOUBLE_COL_WIDTH, 2.7))
-    ax.plot(timesteps, rolling_mean, color='#0072B2', linewidth=2.0, label=f'Rolling Mean ({actual_window} steps)', zorder=3)
-    ax.fill_between(timesteps, rolling_mean - rolling_std, rolling_mean + rolling_std, 
+    ax.plot(plot_t, plot_m, color='#0072B2', linewidth=2.0, label=mean_label, zorder=3)
+    ax.fill_between(plot_t, plot_m - plot_s, plot_m + plot_s, 
                     color='#0072B2', alpha=0.20, label=r'$\pm 1\sigma$ Variance', zorder=2)
     ax.axhline(y=0, color='black', linewidth=0.8, linestyle='--', alpha=0.6, zorder=1)
     
@@ -120,6 +145,13 @@ def generate_training_convergence_plot(csv_path, save_path, window_size=1000, ti
     
     margin = (max(timesteps) - min(timesteps)) * 0.02
     ax.set_xlim(min(timesteps) - margin, max(timesteps) + margin)
+    
+    # Set clean y-limits with padding
+    y_min = float(min(plot_m - plot_s))
+    y_max = float(max(plot_m + plot_s))
+    y_span = max(y_max - y_min, 1.0)
+    ax.set_ylim(y_min - 0.08 * y_span, y_max + 0.15 * y_span)
+
     ax.legend(loc='lower right', frameon=True, fancybox=False, edgecolor='black', fontsize=7.5)
     ax.grid(True, linestyle='--', alpha=0.35, zorder=0)
     
@@ -201,6 +233,11 @@ def generate_baseline_comparison_plot(csv_path, save_path):
     }
     df = df.rename(columns=col_mapping)
 
+    # If the CSV contains factorial variants (Stateless vs MBB), isolate the canonical deployed MBB implementation
+    if df['Policy'].str.contains('MBB').any() and df['Policy'].str.contains('Stateless').any():
+        df = df[df['Policy'].str.contains('MBB')].copy()
+    df['Policy'] = df['Policy'].str.replace(' (MBB)', '', regex=False)
+
     baselines = df['Policy'].tolist()
     n_bars = len(baselines)
     x = np.arange(n_bars)
@@ -218,7 +255,13 @@ def generate_baseline_comparison_plot(csv_path, save_path):
     fmd_err = df['Control_Plane_FlowMods_std'] if 'Control_Plane_FlowMods_std' in df.columns else None
 
     short_baselines = [
-        b.replace('OF-RHM / ', '').replace('Event-Driven / ', '').replace('Proposed ', '').replace('-MTD', '')
+        b.replace('OF-RHM / Periodic MTD', 'OF-RHM\n(Periodic)')
+         .replace('Event-Driven / IDS-Triggered MTD', 'IDS-MTD\n(Triggered)')
+         .replace('IDS-Triggered MTD', 'IDS-MTD\n(Triggered)')
+         .replace('Binary-Action DRL-MTD', 'Binary\nDRL')
+         .replace('Proposed QoS-Aware DRL-MTD', 'Proposed\nQoS-DRL')
+         .replace('Static (No MTD)', 'Static\n(No MTD)')
+         .replace('DRL Agent (Ours)', 'Proposed\nQoS-DRL')
         for b in baselines
     ]
 
@@ -234,12 +277,12 @@ def generate_baseline_comparison_plot(csv_path, save_path):
             h = bar.get_height()
             err = asr_err.iloc[i] if asr_err is not None else 0
             ax1.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + err),
-                         xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.0, zorder=5)
+                         xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.2, zorder=5)
         ax1.set_ylabel('Attacker Success Rate (%)', fontsize=8.0, fontweight='bold')
         ax1.set_xticks(x)
-        ax1.set_xticklabels(short_baselines, rotation=18, ha='right', fontsize=7.2)
+        ax1.set_xticklabels(short_baselines, rotation=0, ha='center', fontsize=7.2)
         max_asr = (df['Attack_Success_Rate'] + (asr_err if asr_err is not None else 0)).max()
-        ax1.set_ylim(0, max(115, max_asr * 1.18))
+        ax1.set_ylim(0, max_asr * 1.25)
         ax1.set_title('(a) Security Defense Efficacy', fontsize=8.5, pad=6, fontweight='bold')
         ax1.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
 
@@ -251,12 +294,12 @@ def generate_baseline_comparison_plot(csv_path, save_path):
             h = bar.get_height()
             err = qdr_err.iloc[i] if qdr_err is not None else 0
             ax2.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + err),
-                         xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.0, zorder=5)
+                         xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.2, zorder=5)
         ax2.set_ylabel('Session Disruption Rate (%)', fontsize=8.0, fontweight='bold')
         ax2.set_xticks(x)
-        ax2.set_xticklabels(short_baselines, rotation=18, ha='right', fontsize=7.2)
+        ax2.set_xticklabels(short_baselines, rotation=0, ha='center', fontsize=7.2)
         max_qdr = (df['QoS_Disruption_Rate'] + (qdr_err if qdr_err is not None else 0)).max()
-        ax2.set_ylim(0, max(115, max_qdr * 1.18))
+        ax2.set_ylim(0, max(2.5, max_qdr * 1.35))
         ax2.set_title('(b) Collateral Quality-of-Service Cost', fontsize=8.5, pad=6, fontweight='bold')
         ax2.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
 
@@ -266,11 +309,11 @@ def generate_baseline_comparison_plot(csv_path, save_path):
             bar.set_hatch(hatches[i % len(hatches)])
             h = bar.get_height()
             ax3.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h),
-                         xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.0, zorder=5)
+                         xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.2, zorder=5)
         ax3.set_ylabel('Shuffle Frequency (% Steps)', fontsize=8.0, fontweight='bold')
         ax3.set_xticks(x)
-        ax3.set_xticklabels(short_baselines, rotation=18, ha='right', fontsize=7.2)
-        ax3.set_ylim(0, max(100, df['Shuffle_Frequency'].max() * 1.22))
+        ax3.set_xticklabels(short_baselines, rotation=0, ha='center', fontsize=7.2)
+        ax3.set_ylim(0, max(100.0, df['Shuffle_Frequency'].max() * 1.18))
         ax3.set_title('(c) MTD Actuation Frequency', fontsize=8.5, pad=6, fontweight='bold')
         ax3.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
 
@@ -282,10 +325,10 @@ def generate_baseline_comparison_plot(csv_path, save_path):
             h = bar.get_height()
             err = fmd_err.iloc[i] if fmd_err is not None else 0
             ax4.annotate(f'{h:.0f}', xy=(bar.get_x() + bar.get_width()/2, h + err),
-                         xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.0, zorder=5)
+                         xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.2, zorder=5)
         ax4.set_ylabel('Total FLOW_MOD Messages', fontsize=8.0, fontweight='bold')
         ax4.set_xticks(x)
-        ax4.set_xticklabels(short_baselines, rotation=18, ha='right', fontsize=7.2)
+        ax4.set_xticklabels(short_baselines, rotation=0, ha='center', fontsize=7.2)
         max_fmd = (df['Control_Plane_FlowMods'] + (fmd_err if fmd_err is not None else 0)).max()
         ax4.set_ylim(0, max_fmd * 1.25)
         ax4.set_title('(d) SDN Control Plane Overhead', fontsize=8.5, pad=6, fontweight='bold')
@@ -302,8 +345,9 @@ def generate_baseline_comparison_plot(csv_path, save_path):
                          xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.2, zorder=5)
         ax1.set_ylabel('Attacker Success Rate (%)', fontsize=8.0, fontweight='bold')
         ax1.set_xticks(x)
-        ax1.set_xticklabels(short_baselines, rotation=18, ha='right', fontsize=7.2)
-        ax1.set_ylim(0, 115)
+        ax1.set_xticklabels(short_baselines, rotation=0, ha='center', fontsize=7.2)
+        max_asr = (df['Attack_Success_Rate'] + (asr_err if asr_err is not None else 0)).max()
+        ax1.set_ylim(0, max_asr * 1.25)
         ax1.set_title('(a) Security Defense Efficacy', fontsize=8.5, pad=6, fontweight='bold')
         ax1.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
 
@@ -316,8 +360,9 @@ def generate_baseline_comparison_plot(csv_path, save_path):
                          xytext=(0, 2.5), textcoords="offset points", ha='center', va='bottom', fontweight='bold', fontsize=7.2, zorder=5)
         ax2.set_ylabel('Session Disruption Rate (%)', fontsize=8.0, fontweight='bold')
         ax2.set_xticks(x)
-        ax2.set_xticklabels(short_baselines, rotation=18, ha='right', fontsize=7.2)
-        ax2.set_ylim(0, 115)
+        ax2.set_xticklabels(short_baselines, rotation=0, ha='center', fontsize=7.2)
+        max_qdr = (df['QoS_Disruption_Rate'] + (qdr_err if qdr_err is not None else 0)).max()
+        ax2.set_ylim(0, max(2.5, max_qdr * 1.35))
         ax2.set_title('(b) Collateral Quality-of-Service Cost', fontsize=8.5, pad=6, fontweight='bold')
         ax2.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
 
@@ -367,13 +412,20 @@ def generate_episode_timeline_trace(csv_path, save_path):
         mask = df['Action'] == action
         if mask.any():
             ax3.scatter(df[mask]['Step'], df[mask]['Reward'], c=action_colors[action], marker=action_markers[action], 
-                       s=45, label=f'{action_labels[action]} (R={df[mask]["Reward"].mean():.2f})',
+                       s=45, label=f'{action_labels[action]} (Mean R={df[mask]["Reward"].mean():.2f})',
                        edgecolor='k', linewidth=0.6, alpha=0.9, zorder=4)
     ax3.set_xlabel('Decision Time Step', fontsize=8.2, fontweight='bold')
     ax3.set_ylabel(r'Reward ($R_t$)', fontsize=8.0, fontweight='bold')
-    ax3.set_ylim(-0.8, 10.5)
-    # Position legend in upper left (steps 0-11 have R=0 at bottom, leaving upper left clear)
-    ax3.legend(loc='upper left', bbox_to_anchor=(0.015, 0.98), frameon=True, ncol=1, fontsize=7.0, framealpha=0.92, edgecolor='black')
+    
+    r_min = float(df['Reward'].min())
+    r_max = float(df['Reward'].max())
+    y_pad = max(1.5, (r_max - r_min) * 0.12)
+    ax3.set_ylim(r_min - y_pad, r_max + y_pad)
+    ax3.axhline(0, color='black', linewidth=0.7, linestyle=':', alpha=0.6, zorder=1)
+    
+    top_right_occupied = ((df['Step'] > df['Step'].max() * 0.6) & (df['Reward'] > r_max - 2 * y_pad)).any()
+    leg_loc = 'upper left' if top_right_occupied else 'upper right'
+    ax3.legend(loc=leg_loc, frameon=True, ncol=1, fontsize=7.0, framealpha=0.92, edgecolor='black')
     ax3.grid(True, linestyle='--', alpha=0.35, zorder=0)
     
     fig.align_ylabels([ax1, ax2, ax3])
@@ -406,17 +458,30 @@ def generate_policy_heatmap(csv_path, save_path, title="Learned Policy Decision 
     # Add clean, non-colliding region watermark callouts conditionally
     vals = pivot_data.values
     if 0 in vals:
-        ax.text(0.50, 0.08, 'HOLD (Preserve QoS)', ha='center', va='center',
-                fontsize=7.5, fontweight='bold', color='white',
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='#0072B2', edgecolor='white', lw=0.5, alpha=0.85))
-    if 1 in vals:
-        ax.text(0.12, 0.65, 'GLOBAL\n(Max Sec)', ha='center', va='center',
+        ax.text(0.50, 0.07, 'HOLD (Preserve QoS)', ha='center', va='center',
                 fontsize=7.2, fontweight='bold', color='white',
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='#E69F00', edgecolor='white', lw=0.5, alpha=0.85))
-    if 2 in vals:
-        ax.text(0.65, 0.65, 'TARGETED\n(Balanced MTD)', ha='center', va='center',
+                bbox=dict(boxstyle='round,pad=0.18', facecolor='#0072B2', edgecolor='white', lw=0.5, alpha=0.88))
+    
+    if (1 in vals) and (2 not in vals):
+        # Sweep regime: broad GLOBAL region
+        ax.text(0.42, 0.70, 'GLOBAL (Max Sec)', ha='center', va='center',
                 fontsize=7.2, fontweight='bold', color='white',
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='#D55E00', edgecolor='white', lw=0.5, alpha=0.85))
+                bbox=dict(boxstyle='round,pad=0.18', facecolor='#E69F00', edgecolor='white', lw=0.5, alpha=0.88))
+    elif (1 not in vals) and (2 in vals):
+        # Targeted scan regime: broad TARGETED region
+        ax.text(0.50, 0.58, 'TARGETED (Balanced MTD)', ha='center', va='center',
+                fontsize=7.2, fontweight='bold', color='white',
+                bbox=dict(boxstyle='round,pad=0.18', facecolor='#D55E00', edgecolor='white', lw=0.5, alpha=0.88))
+    else:
+        # Dual-action active regime: keep strictly within axes boundaries
+        if 1 in vals:
+            ax.text(0.04, 0.72, 'GLOBAL\n(Max Sec)', ha='left', va='center',
+                    fontsize=6.8, fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round,pad=0.14', facecolor='#E69F00', edgecolor='white', lw=0.5, alpha=0.88))
+        if 2 in vals:
+            ax.text(0.65, 0.65, 'TARGETED\n(Balanced MTD)', ha='center', va='center',
+                    fontsize=6.8, fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round,pad=0.14', facecolor='#D55E00', edgecolor='white', lw=0.5, alpha=0.88))
     
     ax.set_xlabel('Network Flow Load ($F_t$)', fontsize=8.0, fontweight='bold')
     ax.set_ylabel('Threat Intensity ($I_t$)', fontsize=8.0, fontweight='bold')
@@ -452,10 +517,15 @@ def generate_sim_to_real_comparison_plot(mock_csv, real_csv, save_path):
     df_real = df_real.rename(columns=col_mapping)
     
     def get_drl_row(df):
-        for name in ['Proposed QoS-Aware DRL-MTD', 'DRL Agent (Ours)', 'drl']:
-            matched = df[df['Policy'] == name]
+        # Prefer MBB version if available in factorial results
+        if df['Policy'].str.contains('MBB').any():
+            mbb_matched = df[df['Policy'].str.contains('MBB') & df['Policy'].str.contains('Proposed', regex=True)]
+            if not mbb_matched.empty:
+                return mbb_matched.iloc[0]
+        for name in ['Proposed QoS-Aware DRL-MTD', 'DRL Agent (Ours)', 'Proposed']:
+            matched = df[df['Policy'].str.contains(name, na=False)]
             if not matched.empty:
-                return matched.iloc[0]
+                return matched.iloc[-1]
         return df.iloc[-1]
 
     mock_drl = get_drl_row(df_mock)
@@ -471,7 +541,8 @@ def generate_sim_to_real_comparison_plot(mock_csv, real_csv, save_path):
     ax1.set_ylabel('Attacker Success Rate (%)', fontsize=8.2, fontweight='bold')
     ax1.set_xticks(x)
     ax1.set_xticklabels(categories, fontsize=7.8)
-    ax1.set_ylim(0, 115)
+    max_asr = max(attack_success)
+    ax1.set_ylim(0, max(20.0, max_asr * 1.35))
     ax1.set_title('(a) Security Defense Efficacy', fontsize=8.8, pad=8, fontweight='bold')
     ax1.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
     for bar in bars1:
@@ -482,7 +553,8 @@ def generate_sim_to_real_comparison_plot(mock_csv, real_csv, save_path):
     ax2.set_ylabel('Session Disruption Rate (%)', fontsize=8.2, fontweight='bold')
     ax2.set_xticks(x)
     ax2.set_xticklabels(categories, fontsize=7.8)
-    ax2.set_ylim(0, 115)
+    max_qdr = max(qos_disruption)
+    ax2.set_ylim(0, max(25.0, max_qdr * 1.35))
     ax2.set_title('(b) Collateral Quality-of-Service Cost', fontsize=8.8, pad=8, fontweight='bold')
     ax2.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
     for bar in bars2:
@@ -578,7 +650,8 @@ def generate_statistical_distribution_plot(run_dir, save_path):
     ax1.set_title('(a) Attacker Success Rate (ASR)', fontsize=8.8, fontweight='bold', pad=7)
     ax1.set_ylabel('ASR (%)', fontsize=8.2, fontweight='bold')
     ax1.set_xlabel('Defense Policy', fontsize=8.0, fontweight='bold')
-    ax1.set_ylim(-5, 108)
+    max_asr = float(df_ep['asr'].max())
+    ax1.set_ylim(-3, max(42.0, max_asr * 1.25))
     ax1.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
     ax1.tick_params(axis='x', labelsize=6.8, pad=2)
     ax1.tick_params(axis='y', labelsize=7.5)
@@ -642,56 +715,75 @@ def generate_pareto_efficiency_plot(csv_path, save_path):
     }
     df = df.rename(columns=col_mapping)
 
-    fig, ax = plt.subplots(figsize=(IEEE_SINGLE_COL_WIDTH, 3.0))
+    # If the CSV contains factorial variants (Stateless vs MBB), isolate the canonical deployed MBB implementation
+    if df['Policy'].str.contains('MBB').any() and df['Policy'].str.contains('Stateless').any():
+        df = df[df['Policy'].str.contains('MBB')].copy()
+    df['Policy'] = df['Policy'].str.replace(' (MBB)', '', regex=False)
+
+    fig, ax = plt.subplots(figsize=(IEEE_SINGLE_COL_WIDTH, 3.1))
 
     max_fm = df['FlowMods'].max()
-    bubble_sizes = 45 + (df['FlowMods'] / max_fm) * 160
+    bubble_sizes = 50 + (df['FlowMods'] / max_fm) * 180
 
     # Non-colliding dedicated quadrant annotations with subtle bounding boxes
     meta = {
         'Static (No MTD)': {
             'name': 'Static (No MTD)',
             'color': '#555555',
-            'xytext': (12, -8),
+            'xytext': (16, -6),
             'ha': 'left', 'va': 'top'
         },
         'OF-RHM / Periodic MTD': {
             'name': 'OF-RHM (Periodic)',
             'color': '#D55E00',
-            'xytext': (-4, 20),
-            'ha': 'center', 'va': 'bottom'
+            'xytext': (14, 16),
+            'ha': 'left', 'va': 'bottom'
         },
         'Event-Driven / IDS-Triggered MTD': {
             'name': 'IDS-MTD',
             'color': '#E69F00',
-            'xytext': (-8, -24),
-            'ha': 'center', 'va': 'top'
+            'xytext': (12, 22),
+            'ha': 'left', 'va': 'bottom'
+        },
+        'IDS-Triggered MTD': {
+            'name': 'IDS-MTD',
+            'color': '#E69F00',
+            'xytext': (12, 22),
+            'ha': 'left', 'va': 'bottom'
         },
         'Binary-Action DRL-MTD': {
             'name': 'Binary DRL',
             'color': '#0072B2',
-            'xytext': (16, 20),
-            'ha': 'left', 'va': 'bottom'
+            'xytext': (14, -8),
+            'ha': 'left', 'va': 'top'
         },
         'Proposed QoS-Aware DRL-MTD': {
             'name': 'Proposed QoS-DRL',
             'color': '#009E73',
-            'xytext': (16, -6),
+            'xytext': (-12, -26),
             'ha': 'left', 'va': 'top'
         }
     }
 
+    def get_info(pol):
+        if pol in meta:
+            return meta[pol]
+        for k, v in meta.items():
+            if k in pol or pol in k:
+                return v
+        return {'name': pol, 'color': '#333333', 'xytext': (12, 12), 'ha': 'left', 'va': 'bottom'}
+
     for idx, row in df.iterrows():
         pol = row['Policy']
-        info = meta.get(pol, {'name': pol, 'color': '#333333', 'xytext': (12, 12), 'ha': 'left', 'va': 'bottom'})
+        info = get_info(pol)
         c = info['color']
-        sz = bubble_sizes.iloc[idx]
+        sz = bubble_sizes.loc[idx]
         ax.scatter(row['QDR'], row['ASR'], s=sz, color=c, edgecolor='black', linewidth=1.1, alpha=0.9, zorder=5)
         
         fm_val = row.get('FlowMods', 0)
         label_text = f"{info['name']}\n({int(round(fm_val))} FlowMods)"
         
-        use_arrow = (abs(info['xytext'][1]) >= 20 or abs(info['xytext'][0]) >= 25)
+        use_arrow = True
         ax.annotate(
             label_text,
             xy=(row['QDR'], row['ASR']),
@@ -702,8 +794,8 @@ def generate_pareto_efficiency_plot(csv_path, save_path):
             ha=info['ha'],
             va=info['va'],
             zorder=6,
-            arrowprops=dict(arrowstyle='-', color='gray', lw=0.6) if use_arrow else None,
-            bbox=dict(boxstyle='round,pad=0.15', facecolor='white', edgecolor='#cccccc', lw=0.4, alpha=0.88)
+            arrowprops=dict(arrowstyle='->', color='#555555', lw=0.6) if use_arrow else None,
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='#cccccc', lw=0.4, alpha=0.92)
         )
 
     # Pareto Frontier: Objectively compute non-dominated points (minimizing both QDR and ASR)
@@ -752,24 +844,18 @@ def generate_pareto_efficiency_plot(csv_path, save_path):
     elif len(px) >= 2:
         ax.plot(px, py, color='#c44e52', linestyle='--', linewidth=1.6, zorder=3, label='Pareto Frontier')
 
-    # Ideal point callout in bottom-left
-    ax.annotate(
-        'Ideal Point\n(0%, 0%)',
-        xy=(0, 4), xytext=(8, 14),
-        arrowprops=dict(facecolor='black', edgecolor='none', arrowstyle='->', lw=1.2),
-        fontsize=6.2, fontweight='bold', ha='left', va='center',
-        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='black', lw=0.6, alpha=0.9)
-    )
-
     # Size legend for FlowMod bubble overhead
+    min_fm = int(df['FlowMods'].min())
+    med_fm = int(df['FlowMods'].median())
+    max_fm_val = int(df['FlowMods'].max())
     leg_line = ax.plot([], [], color='#c44e52', linestyle='--', linewidth=1.5, label='Pareto Frontier')[0]
-    leg_s1 = ax.scatter([], [], s=45, c='#777777', edgecolors='k', linewidth=0.8, label='7 FlowMods')
-    leg_s2 = ax.scatter([], [], s=115, c='#777777', edgecolors='k', linewidth=0.8, label='1000 FlowMods')
-    leg_s3 = ax.scatter([], [], s=205, c='#777777', edgecolors='k', linewidth=0.8, label='2500 FlowMods')
+    leg_s1 = ax.scatter([], [], s=45, c='#777777', edgecolors='k', linewidth=0.8, label=f'{min_fm} FlowMods')
+    leg_s2 = ax.scatter([], [], s=115, c='#777777', edgecolors='k', linewidth=0.8, label=f'{med_fm} FlowMods')
+    leg_s3 = ax.scatter([], [], s=205, c='#777777', edgecolors='k', linewidth=0.8, label=f'{max_fm_val} FlowMods')
 
     ax.legend(
         handles=[leg_line, leg_s1, leg_s2, leg_s3],
-        labels=['Pareto Frontier', '7 FlowMods', '1000 FlowMods', '2500 FlowMods'],
+        labels=['Pareto Frontier', f'{min_fm} FlowMods', f'{med_fm} FlowMods', f'{max_fm_val} FlowMods'],
         loc='upper right', fontsize=6.0, frameon=True, framealpha=0.92, edgecolor='black',
         markerscale=0.65, labelspacing=0.5, borderpad=0.4
     )
@@ -778,8 +864,10 @@ def generate_pareto_efficiency_plot(csv_path, save_path):
     ax.set_ylabel('Attacker Success Rate (ASR %)', fontsize=7.8, fontweight='bold')
     ax.set_title('Pareto Trade-Off: Security vs. Disruption vs. FlowMods', fontsize=8.2, fontweight='bold', pad=6)
 
-    ax.set_xlim(-6, 88)
-    ax.set_ylim(-2, 116)
+    x_max = max(float(df['QDR'].max()) * 1.45, 3.2)
+    ax.set_xlim(-0.3, x_max)
+    y_max = max(float(df['ASR'].max()) * 1.22, 55.0)
+    ax.set_ylim(-2.0, y_max)
     ax.grid(True, linestyle='--', alpha=0.35, zorder=0)
     ax.tick_params(labelsize=7.0)
 
@@ -863,7 +951,7 @@ def generate_mbb_tcp_dashboard(csv_path, save_path):
     collapse_y = float(cwnd_stateless.iloc[9]) if len(cwnd_stateless) > 9 and cwnd_stateless.iloc[9] > 0 else 1.45
     ax2.annotate(
         'RTO Timeout:\ncwnd Collapses',
-        xy=(10, collapse_y), xytext=(15.5, max_cwnd * 0.35),
+        xy=(8.5, collapse_y), xytext=(11.5, max_cwnd * 0.45),
         arrowprops=dict(facecolor='#8B0000', edgecolor='black', arrowstyle='->', lw=1.0),
         fontsize=6.8, fontweight='bold', color='#8B0000',
         bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='#8B0000', alpha=0.92),
@@ -874,7 +962,7 @@ def generate_mbb_tcp_dashboard(csv_path, save_path):
     ax2.set_title('(b) TCP Congestion Window ($cwnd$) Dynamics: Lossless Chaining vs. RTO Collapse', fontsize=8.8, fontweight='bold', pad=5)
     ax2.set_ylim(0, max_cwnd * 1.15)
     ax2.grid(True, linestyle='--', alpha=0.35, zorder=0)
-    ax2.legend(loc='lower left', bbox_to_anchor=(0.015, 0.12), fontsize=7.0, frameon=True, framealpha=0.92, edgecolor='black')
+    ax2.legend(loc='center right', bbox_to_anchor=(0.985, 0.42), fontsize=7.0, frameon=True, framealpha=0.92, edgecolor='black')
 
     # --- PANEL 3: Retransmissions Impulses ---
     w = 0.35
@@ -997,12 +1085,12 @@ def generate_factorial_comparison_plot(csv_path, save_path):
     for bar, err in zip(bars_qdr_st, df_st['QDR_ci']):
         h = bar.get_height()
         ax1.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(0, 2), textcoords="offset points", ha='center', va='bottom',
+                     xytext=(-2, 2), textcoords="offset points", ha='right', va='bottom',
                      fontweight='bold', fontsize=5.8, zorder=5)
     for bar, err in zip(bars_qdr_mb, df_mb['QDR_ci']):
         h = bar.get_height()
         ax1.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(0, 2), textcoords="offset points", ha='center', va='bottom',
+                     xytext=(2, 2), textcoords="offset points", ha='left', va='bottom',
                      fontweight='bold', fontsize=5.8, zorder=5)
 
     ax1.set_ylabel('Session Disruption Rate (%)', fontsize=8.0, fontweight='bold')
@@ -1033,12 +1121,12 @@ def generate_factorial_comparison_plot(csv_path, save_path):
     for bar, err in zip(bars_asr_st, df_st['ASR_ci']):
         h = bar.get_height()
         ax2.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(0, 2), textcoords="offset points", ha='center', va='bottom',
+                     xytext=(-2, 2), textcoords="offset points", ha='right', va='bottom',
                      fontweight='bold', fontsize=5.8, zorder=5)
     for bar, err in zip(bars_asr_mb, df_mb['ASR_ci']):
         h = bar.get_height()
         ax2.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(0, 2), textcoords="offset points", ha='center', va='bottom',
+                     xytext=(2, 2), textcoords="offset points", ha='left', va='bottom',
                      fontweight='bold', fontsize=5.8, zorder=5)
 
     ax2.set_ylabel('Attacker Success Rate (%)', fontsize=8.0, fontweight='bold')
@@ -1068,12 +1156,12 @@ def generate_factorial_comparison_plot(csv_path, save_path):
     for bar, err in zip(bars_fmd_st, df_st['FlowMods_ci']):
         h = bar.get_height()
         ax3.annotate(f'{h:.0f}', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(0, 2), textcoords="offset points", ha='center', va='bottom',
+                     xytext=(-2, 2), textcoords="offset points", ha='right', va='bottom',
                      fontweight='bold', fontsize=5.8, zorder=5)
     for bar, err in zip(bars_fmd_mb, df_mb['FlowMods_ci']):
         h = bar.get_height()
         ax3.annotate(f'{h:.0f}', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(0, 2), textcoords="offset points", ha='center', va='bottom',
+                     xytext=(2, 2), textcoords="offset points", ha='left', va='bottom',
                      fontweight='bold', fontsize=5.8, zorder=5)
 
     ax3.set_ylabel('Total FLOW_MOD Overhead', fontsize=8.0, fontweight='bold')
@@ -1252,14 +1340,14 @@ if __name__ == "__main__":
             generate_policy_heatmap(
                 pol_targ_csv,
                 os.path.join(REAL_PLOTS_DIR, "policy_heatmap_targeted.pdf"),
-                title="Policy Surface: Localized Scan Regime (n=2 targets)"
+                title="Policy Surface: Localized Scan Regime ($n=2$ targets, Sim)"
             )
         pol_swp_csv = os.path.join(SCRIPT_DIR, "policy_evaluation_sweep_sim.csv")
         if os.path.exists(pol_swp_csv):
             generate_policy_heatmap(
                 pol_swp_csv,
                 os.path.join(REAL_PLOTS_DIR, "policy_heatmap_sweep.pdf"),
-                title="Policy Surface: Distributed Sweep Regime (n=10 targets)"
+                title="Policy Surface: Distributed Sweep Regime ($n=10$ targets, Sim)"
             )
         
         # Sim-to-Real Comparison
