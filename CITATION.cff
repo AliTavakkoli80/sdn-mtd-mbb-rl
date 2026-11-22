@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use this software or the accompanying benchmark artifacts, please cite both the software and the Elsevier Array article."
+title: "Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning"
+type: software
+authors:
+  - family-names: "Tavakkoli"
+    given-names: "Ali"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+version: "v1.0.0"
+date-released: "2026-11-22"
+license: "MIT"
+repository-code: "https://github.com/AliTavakkoli80/MTD"
+url: "https://github.com/AliTavakkoli80/MTD"
+abstract: >-
+  A stateful, zero-downtime Moving Target Defense (MTD) framework for
+  Software-Defined Networks (SDN). Implements an OpenFlow 1.3 Make-Before-Break
+  (MBB) dual-table pipeline (Table 0 Active and Table 1 Grace) integrated with
+  an information-theoretic L2/L3/L4 threat detector and an 8-dimensional
+  Multi-Objective Markov Decision Process (MOMDP) solved via Proximal Policy
+  Optimization (PPO) with Sim-to-Real fine-tuning on a 16-host 2-Spine 4-Leaf
+  Containernet testbed.
+keywords:
+  - "Software-Defined Networking"
+  - "Moving Target Defense"
+  - "Deep Reinforcement Learning"
+  - "Proximal Policy Optimization"
+  - "Make-Before-Break"
+  - "OpenFlow 1.3"
+  - "Zero-Downtime Networking"
+preferred-citation:
+  type: article
+  title: "Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning"
+  authors:
+    - family-names: "Tavakkoli"
+      given-names: "Ali"
+  journal: "Array"
+  publisher:
+    name: "Elsevier"
+  year: 2026
+  notes: "Submitted to Elsevier Array; update DOI and volume/page metadata upon publication."

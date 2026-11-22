@@ -138,11 +138,55 @@ celerybeat.pid
 .env
 .envrc
 .venv
+.venv/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+.conda/
+
+# OS & editor artifacts
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+.vscode/
+.idea/
+
+# Logs, packet captures, and core dumps
+*.log
+*.pcap
+*.pcapng
+core
+core.*
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.out
+*.synctex.gz
+*.toc
+*.abs
+*.spl
+*.dvi
+*.ps
+*.nav
+*.snm
+*.vrb
+
+# Keep only the final compiled manuscript PDF in paper/
+paper/*
+!paper/main.pdf
+/paper*.zip
 
 # Spyder project settings
 .spyderproject

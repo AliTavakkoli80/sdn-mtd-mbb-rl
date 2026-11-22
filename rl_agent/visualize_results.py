@@ -125,7 +125,7 @@ def generate_training_convergence_plot(csv_path, save_path, window_size=1000, ti
     fig, ax = plt.subplots(figsize=(IEEE_DOUBLE_COL_WIDTH, 2.7))
     ax.plot(plot_t, plot_m, color='#0072B2', linewidth=2.0, label=mean_label, zorder=3)
     ax.fill_between(plot_t, plot_m - plot_s, plot_m + plot_s, 
-                    color='#0072B2', alpha=0.20, label=r'$\pm 1\sigma$ Variance', zorder=2)
+                    color='#0072B2', alpha=0.20, label='1-SD Variance Band (+/- 1 SD)', zorder=2)
     ax.axhline(y=0, color='black', linewidth=0.8, linestyle='--', alpha=0.6, zorder=1)
     
     # Only show transition line if 300,000 is within the plotted range
@@ -942,13 +942,13 @@ def generate_mbb_tcp_dashboard(csv_path, save_path):
     ax2.plot(df['Time'], cwnd_mbb, color=c_mbb, linewidth=2.0, marker='o', markersize=3.5,
              label=f'MBB: Steady-State cwnd (~{int(max_cwnd)} KB)', zorder=4)
     ax2.plot(df['Time'], cwnd_stateless, color=c_stateless, linewidth=1.8, linestyle='--', marker='s', markersize=3.5,
-             label='Stateless: cwnd Collapse to 1 MSS (1.45 KB)', zorder=4)
+             label='Stateless: cwnd Collapse to 1 MSS (1.41 KB)', zorder=4)
 
     for t in shuffle_times:
         ax2.axvline(x=t, color=c_events, linestyle=':', linewidth=1.5, alpha=0.85, zorder=2)
 
     # Callout annotation at collapse point (safely away from legend)
-    collapse_y = float(cwnd_stateless.iloc[9]) if len(cwnd_stateless) > 9 and cwnd_stateless.iloc[9] > 0 else 1.45
+    collapse_y = float(cwnd_stateless.iloc[9]) if len(cwnd_stateless) > 9 and cwnd_stateless.iloc[9] > 0 else 1.41
     ax2.annotate(
         'RTO Timeout:\ncwnd Collapses',
         xy=(8.5, collapse_y), xytext=(11.5, max_cwnd * 0.45),
@@ -1011,7 +1011,7 @@ def generate_factorial_comparison_plot(csv_path, save_path):
     # 5 canonical policy categories
     policy_defs = [
         ('Static', 'Static'),
-        ('Periodic', 'OF-RHM (Periodic)'),
+        ('Periodic', 'OF-RHM'),
         ('IDS', 'IDS-Triggered'),
         ('Binary', 'Binary DRL'),
         ('Proposed', 'Proposed QoS-DRL')
@@ -1059,122 +1059,156 @@ def generate_factorial_comparison_plot(csv_path, save_path):
 
     n_groups = len(labels)
     x = np.arange(n_groups)
-    width = 0.36
+    width = 0.35
+    pair_offset = 0.19
 
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(IEEE_DOUBLE_COL_WIDTH, 2.7))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(7.1, 2.6))
 
     c_stateless = '#D55E00'  # Vermillion (Okabe-Ito)
     c_mbb = '#009E73'        # Bluish Green (Okabe-Ito)
 
+    def annotate_bars(ax, bars, errs, fmt_str):
+        for bar, err in zip(bars, errs):
+            h = bar.get_height()
+            err_val = float(err) if pd.notna(err) else 0.0
+            y_top = h + err_val
+            ax.annotate(
+                fmt_str.format(h),
+                xy=(bar.get_x() + bar.get_width() / 2.0, y_top),
+                xytext=(0, 3.0),
+                textcoords="offset points",
+                ha='center', va='bottom',
+                rotation=90,
+                fontweight='bold',
+                fontsize=6.8,
+                color='#111111',
+                zorder=5
+            )
+
+    def style_xticks(ax):
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            labels,
+            rotation=25,
+            ha='right',
+            rotation_mode='anchor',
+            fontsize=8.5,
+            fontweight='semibold'
+        )
+        ax.tick_params(axis='x', pad=3)
+        ax.tick_params(axis='y', labelsize=7.5)
+        ax.set_xlim(-0.55, n_groups - 0.45)
+
     # ----------------------------------------------------
     # PANEL (a): QoS Disruption Rate (QDR %)
     # ----------------------------------------------------
+    qdr_st_err = np.minimum(df_st['QDR_mean'], df_st['QDR_ci'])
+    qdr_mb_err = np.minimum(df_mb['QDR_mean'], df_mb['QDR_ci'])
     bars_qdr_st = ax1.bar(
-        x - width/2, df_st['QDR_mean'], width, yerr=df_st['QDR_ci'], capsize=2.5,
-        error_kw={'elinewidth': 0.8, 'ecolor': 'black'},
+        x - pair_offset, df_st['QDR_mean'], width,
+        yerr=[qdr_st_err, df_st['QDR_ci']], capsize=2.2,
+        error_kw={'elinewidth': 0.85, 'ecolor': '#111111', 'capthick': 0.85},
         color=c_stateless, hatch='///', edgecolor='k', linewidth=0.8,
         label='Stateless (Hard Drop)', zorder=3
     )
     bars_qdr_mb = ax1.bar(
-        x + width/2, df_mb['QDR_mean'], width, yerr=df_mb['QDR_ci'], capsize=2.5,
-        error_kw={'elinewidth': 0.8, 'ecolor': 'black'},
+        x + pair_offset, df_mb['QDR_mean'], width,
+        yerr=[qdr_mb_err, df_mb['QDR_ci']], capsize=2.2,
+        error_kw={'elinewidth': 0.85, 'ecolor': '#111111', 'capthick': 0.85},
         color=c_mbb, edgecolor='k', linewidth=0.8,
         label='Stateful (Table-1 MBB)', zorder=3
     )
+    annotate_bars(ax1, bars_qdr_st, df_st['QDR_ci'], '{:.1f}%')
+    annotate_bars(ax1, bars_qdr_mb, df_mb['QDR_ci'], '{:.1f}%')
 
-    for bar, err in zip(bars_qdr_st, df_st['QDR_ci']):
-        h = bar.get_height()
-        ax1.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(-2, 2), textcoords="offset points", ha='right', va='bottom',
-                     fontweight='bold', fontsize=5.8, zorder=5)
-    for bar, err in zip(bars_qdr_mb, df_mb['QDR_ci']):
-        h = bar.get_height()
-        ax1.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(2, 2), textcoords="offset points", ha='left', va='bottom',
-                     fontweight='bold', fontsize=5.8, zorder=5)
-
-    ax1.set_ylabel('Session Disruption Rate (%)', fontsize=8.0, fontweight='bold')
-    ax1.set_xticks(x)
-    ax1.set_xticklabels(labels, rotation=22, ha='right', fontsize=6.8)
-    max_qdr = max(float((df_st['QDR_mean'] + df_st['QDR_ci']).max()), float((df_mb['QDR_mean'] + df_mb['QDR_ci']).max()), 2.0)
-    ax1.set_ylim(0, max_qdr * 1.35)
-    ax1.set_title('(a) Collateral QoS Disruption (QDR)', fontsize=8.5, pad=6, fontweight='bold')
+    ax1.set_ylabel('Disruption Rate (%)', fontsize=8.2, fontweight='bold')
+    style_xticks(ax1)
+    max_qdr = max(float((df_st['QDR_mean'] + df_st['QDR_ci']).max()),
+                  float((df_mb['QDR_mean'] + df_mb['QDR_ci']).max()), 2.0)
+    ax1.set_ylim(0, max_qdr * 1.40)
+    ax1.set_title('(a) QoS Disruption (QDR)', fontsize=8.5, pad=6, fontweight='bold')
     ax1.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
-    ax1.legend(loc='upper left', fontsize=6.2, frameon=True, framealpha=0.92, edgecolor='black')
 
     # ----------------------------------------------------
     # PANEL (b): Attacker Success Rate (ASR %)
     # ----------------------------------------------------
+    asr_st_err = np.minimum(df_st['ASR_mean'], df_st['ASR_ci'])
+    asr_mb_err = np.minimum(df_mb['ASR_mean'], df_mb['ASR_ci'])
     bars_asr_st = ax2.bar(
-        x - width/2, df_st['ASR_mean'], width, yerr=df_st['ASR_ci'], capsize=2.5,
-        error_kw={'elinewidth': 0.8, 'ecolor': 'black'},
+        x - pair_offset, df_st['ASR_mean'], width,
+        yerr=[asr_st_err, df_st['ASR_ci']], capsize=2.2,
+        error_kw={'elinewidth': 0.85, 'ecolor': '#111111', 'capthick': 0.85},
         color=c_stateless, hatch='///', edgecolor='k', linewidth=0.8,
         label='Stateless (Hard Drop)', zorder=3
     )
     bars_asr_mb = ax2.bar(
-        x + width/2, df_mb['ASR_mean'], width, yerr=df_mb['ASR_ci'], capsize=2.5,
-        error_kw={'elinewidth': 0.8, 'ecolor': 'black'},
+        x + pair_offset, df_mb['ASR_mean'], width,
+        yerr=[asr_mb_err, df_mb['ASR_ci']], capsize=2.2,
+        error_kw={'elinewidth': 0.85, 'ecolor': '#111111', 'capthick': 0.85},
         color=c_mbb, edgecolor='k', linewidth=0.8,
         label='Stateful (Table-1 MBB)', zorder=3
     )
+    annotate_bars(ax2, bars_asr_st, df_st['ASR_ci'], '{:.1f}%')
+    annotate_bars(ax2, bars_asr_mb, df_mb['ASR_ci'], '{:.1f}%')
 
-    for bar, err in zip(bars_asr_st, df_st['ASR_ci']):
-        h = bar.get_height()
-        ax2.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(-2, 2), textcoords="offset points", ha='right', va='bottom',
-                     fontweight='bold', fontsize=5.8, zorder=5)
-    for bar, err in zip(bars_asr_mb, df_mb['ASR_ci']):
-        h = bar.get_height()
-        ax2.annotate(f'{h:.1f}%', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(2, 2), textcoords="offset points", ha='left', va='bottom',
-                     fontweight='bold', fontsize=5.8, zorder=5)
-
-    ax2.set_ylabel('Attacker Success Rate (%)', fontsize=8.0, fontweight='bold')
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(labels, rotation=22, ha='right', fontsize=6.8)
-    max_asr = max(float((df_st['ASR_mean'] + df_st['ASR_ci']).max()), float((df_mb['ASR_mean'] + df_mb['ASR_ci']).max()), 10.0)
-    ax2.set_ylim(0, max_asr * 1.25)
+    ax2.set_ylabel('Attack Success (%)', fontsize=8.2, fontweight='bold')
+    style_xticks(ax2)
+    max_asr = max(float((df_st['ASR_mean'] + df_st['ASR_ci']).max()),
+                  float((df_mb['ASR_mean'] + df_mb['ASR_ci']).max()), 10.0)
+    ax2.set_ylim(0, max_asr * 1.46)
     ax2.set_title('(b) Defense Efficacy (ASR)', fontsize=8.5, pad=6, fontweight='bold')
     ax2.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
 
     # ----------------------------------------------------
     # PANEL (c): Control Plane FlowMods
     # ----------------------------------------------------
+    fmd_st_err = np.minimum(df_st['FlowMods_mean'], df_st['FlowMods_ci'])
+    fmd_mb_err = np.minimum(df_mb['FlowMods_mean'], df_mb['FlowMods_ci'])
     bars_fmd_st = ax3.bar(
-        x - width/2, df_st['FlowMods_mean'], width, yerr=df_st['FlowMods_ci'], capsize=2.5,
-        error_kw={'elinewidth': 0.8, 'ecolor': 'black'},
+        x - pair_offset, df_st['FlowMods_mean'], width,
+        yerr=[fmd_st_err, df_st['FlowMods_ci']], capsize=2.2,
+        error_kw={'elinewidth': 0.85, 'ecolor': '#111111', 'capthick': 0.85},
         color=c_stateless, hatch='///', edgecolor='k', linewidth=0.8,
         label='Stateless (Hard Drop)', zorder=3
     )
     bars_fmd_mb = ax3.bar(
-        x + width/2, df_mb['FlowMods_mean'], width, yerr=df_mb['FlowMods_ci'], capsize=2.5,
-        error_kw={'elinewidth': 0.8, 'ecolor': 'black'},
+        x + pair_offset, df_mb['FlowMods_mean'], width,
+        yerr=[fmd_mb_err, df_mb['FlowMods_ci']], capsize=2.2,
+        error_kw={'elinewidth': 0.85, 'ecolor': '#111111', 'capthick': 0.85},
         color=c_mbb, edgecolor='k', linewidth=0.8,
         label='Stateful (Table-1 MBB)', zorder=3
     )
+    annotate_bars(ax3, bars_fmd_st, df_st['FlowMods_ci'], '{:.0f}')
+    annotate_bars(ax3, bars_fmd_mb, df_mb['FlowMods_ci'], '{:.0f}')
 
-    for bar, err in zip(bars_fmd_st, df_st['FlowMods_ci']):
-        h = bar.get_height()
-        ax3.annotate(f'{h:.0f}', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(-2, 2), textcoords="offset points", ha='right', va='bottom',
-                     fontweight='bold', fontsize=5.8, zorder=5)
-    for bar, err in zip(bars_fmd_mb, df_mb['FlowMods_ci']):
-        h = bar.get_height()
-        ax3.annotate(f'{h:.0f}', xy=(bar.get_x() + bar.get_width()/2, h + (err or 0)),
-                     xytext=(2, 2), textcoords="offset points", ha='left', va='bottom',
-                     fontweight='bold', fontsize=5.8, zorder=5)
-
-    ax3.set_ylabel('Total FLOW_MOD Overhead', fontsize=8.0, fontweight='bold')
-    ax3.set_xticks(x)
-    ax3.set_xticklabels(labels, rotation=22, ha='right', fontsize=6.8)
-    max_fmd = max(float((df_st['FlowMods_mean'] + df_st['FlowMods_ci']).max()), float((df_mb['FlowMods_mean'] + df_mb['FlowMods_ci']).max()), 100.0)
-    ax3.set_ylim(0, max_fmd * 1.25)
-    ax3.set_title('(c) SDN Control-Plane Overhead', fontsize=8.5, pad=6, fontweight='bold')
+    ax3.set_ylabel('FlowMods / Episode', fontsize=8.2, fontweight='bold')
+    style_xticks(ax3)
+    max_fmd = max(float((df_st['FlowMods_mean'] + df_st['FlowMods_ci']).max()),
+                  float((df_mb['FlowMods_mean'] + df_mb['FlowMods_ci']).max()), 100.0)
+    ax3.set_ylim(0, max_fmd * 1.40)
+    ax3.yaxis.set_major_formatter(
+        mpl.ticker.FuncFormatter(lambda v, p: f'{int(v/1000)}k' if v >= 1000 else f'{int(v)}')
+    )
+    ax3.set_title('(c) Control-Plane Overhead', fontsize=8.5, pad=6, fontweight='bold')
     ax3.grid(True, linestyle='--', alpha=0.35, axis='y', zorder=0)
 
-    fig.tight_layout()
-    plt.savefig(save_path, format='pdf', dpi=300, bbox_inches='tight')
-    print(f"   -> Saved to {save_path}")
+    # Shared top legend centered above the three panels
+    handles, leg_labels = ax1.get_legend_handles_labels()
+    fig.legend(
+        handles, leg_labels,
+        loc='upper center', bbox_to_anchor=(0.53, 0.995),
+        ncol=2, frameon=True, fancybox=False, edgecolor='#333333',
+        fontsize=8.0, columnspacing=1.8, handlelength=1.8
+    )
+
+    fig.subplots_adjust(left=0.075, right=0.99, top=0.80, bottom=0.26, wspace=0.28)
+
+    base_out, ext = os.path.splitext(save_path)
+    pdf_out = save_path if ext.lower() == '.pdf' else f"{base_out}.pdf"
+    png_out = f"{base_out}.png"
+    plt.savefig(pdf_out, format='pdf', dpi=300, bbox_inches='tight', pad_inches=0.04)
+    plt.savefig(png_out, format='png', dpi=300, bbox_inches='tight', pad_inches=0.04)
+    print(f"   -> Saved to {pdf_out} and {png_out}")
     plt.close()
 
 

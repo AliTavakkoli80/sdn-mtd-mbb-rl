@@ -1,9 +1,20 @@
 #!/bin/bash
 set -e
 
-PROJECT_DIR="/home/ubuntu/Projects/MTD"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 export CUDA_VISIBLE_DEVICES=""
+
+if [ -x "$PROJECT_DIR/.venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+    RYU_BIN="$PROJECT_DIR/.venv/bin/ryu-manager"
+elif [ -x "$PROJECT_DIR/venv/bin/python" ]; then
+    PYTHON_BIN="$PROJECT_DIR/venv/bin/python"
+    RYU_BIN="$PROJECT_DIR/venv/bin/ryu-manager"
+else
+    PYTHON_BIN="$(command -v python3)"
+    RYU_BIN="$(command -v ryu-manager)"
+fi
 
 EPISODES=${1:-15}
 STEPS=${2:-42}
@@ -47,22 +58,22 @@ export RYU_API_URL="http://127.0.0.1:8088"
 
 # 1. Start Ryu Controller
 echo "🧠 Starting Ryu Controller..."
-PYTHONPATH="$PROJECT_DIR" "$PROJECT_DIR/.venv/bin/ryu-manager" mtd_ip_shuffling.app --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8088 > ryu_experiment.log 2>&1 &
+PYTHONPATH="$PROJECT_DIR" "$RYU_BIN" mtd_ip_shuffling.app --observe-links --ofp-tcp-listen-port 6653 --wsapi-port 8088 > ryu_experiment.log 2>&1 &
 RYU_PID=$!
 
 echo "Waiting for Ryu REST API on 127.0.0.1:8088..."
-while ! "$PROJECT_DIR/.venv/bin/python" -c "import socket; s = socket.socket(); s.settimeout(1); s.connect(('127.0.0.1', 8088)); s.close()" 2>/dev/null; do
+while ! "$PYTHON_BIN" -c "import socket; s = socket.socket(); s.settimeout(1); s.connect(('127.0.0.1', 8088)); s.close()" 2>/dev/null; do
     sleep 1
 done
 echo "✅ Ryu ready on port 8088!"
 
 # 2. Start Containernet Topology
 echo "🌐 Starting Containernet Topology..."
-sudo -E RYU_API_URL="http://127.0.0.1:8088" "$PROJECT_DIR/.venv/bin/python" testbed/containernet_topos/finetune_topo.py > topo_finetune.log 2>&1 &
+sudo -E RYU_API_URL="http://127.0.0.1:8088" "$PYTHON_BIN" testbed/containernet_topos/finetune_topo.py > topo_finetune.log 2>&1 &
 TOPO_PID=$!
 
 echo "Waiting for Containernet command socket on 127.0.0.1:9999..."
-while ! "$PROJECT_DIR/.venv/bin/python" -c "import socket; s = socket.socket(); s.settimeout(1); s.connect(('127.0.0.1', 9999)); s.close()" 2>/dev/null; do
+while ! "$PYTHON_BIN" -c "import socket; s = socket.socket(); s.settimeout(1); s.connect(('127.0.0.1', 9999)); s.close()" 2>/dev/null; do
     sleep 1
 done
 echo "✅ Containernet Topology ready on port 9999!"
@@ -75,18 +86,18 @@ sleep 10
 echo -e "\n========================================================"
 echo "📊 Running Live Containernet Factorial Evaluation (10 Policies, N=$EPISODES)"
 echo "========================================================"
-"$PROJECT_DIR/.venv/bin/python" rl_agent/evaluate_real_agent.py --episodes "$EPISODES" --steps "$STEPS" --step-duration "$DURATION" --mode factorial
+"$PYTHON_BIN" rl_agent/evaluate_real_agent.py --episodes "$EPISODES" --steps "$STEPS" --step-duration "$DURATION" --mode factorial
 
 # 4. Plot Regeneration
 echo -e "\n========================================================"
 echo "📈 Regenerating Academic Visualizations"
 echo "========================================================"
-"$PROJECT_DIR/.venv/bin/python" rl_agent/visualize_results.py
+"$PYTHON_BIN" rl_agent/visualize_results.py
 
 # 5. Code Consolidation
 echo -e "\n========================================================"
 echo "📦 Consolidating Codebase"
 echo "========================================================"
-"$PROJECT_DIR/.venv/bin/python" consolidate_code.py
+"$PYTHON_BIN" consolidate_code.py
 
 echo -e "\n🎉 FACTORIAL BENCHMARK AND VISUALIZATION COMPLETED SUCCESSFULLY!"

@@ -405,6 +405,80 @@ class FlowManager:
         self.install_dns_interception(datapath)
         self.app.logger.debug(f"[flow] 🗑️ Flushed MTD translation flows in Table 0 on S{datapath.id}")
 
+    def flush_targeted_translation_flows(self, datapath, real_ip, virtual_ip=None):
+        """Deletes Table 0 translation rules strictly matching a mutated host's virtual or real IP."""
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        matches = [
+            parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_dst=real_ip),
+            parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_src=real_ip),
+        ]
+        if virtual_ip:
+            matches.insert(0, parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_dst=virtual_ip))
+
+        for match in matches:
+            mod = parser.OFPFlowMod(
+                datapath=datapath,
+                command=ofproto.OFPFC_DELETE,
+                out_group=ofproto.OFPG_ANY,
+                out_port=ofproto.OFPP_ANY,
+                match=match,
+                cookie=const.COOKIE_MTD_TRANSLATION,
+                cookie_mask=const.COOKIE_MASK_EXACT,
+                table_id=const.TABLE_ACTIVE
+            )
+            datapath.send_msg(mod)
+            self.flow_mod_count += 1
+
+        self.app.logger.debug(
+            f"[flow] 🎯 Flushed targeted Table 0 translation flows for {real_ip} (VIP={virtual_ip}) on S{datapath.id}"
+        )
+
+    def evict_threat_source_from_grace(self, src_ip):
+        """
+        Algorithm 1 Phase 2: Immediately evicts any Table 1 (TABLE_GRACE) flows and tracked sessions
+        associated with a flagged adversary IP prior to hard timeout expiration.
+        """
+        if not src_ip:
+            return 0
+
+        for k in list(self.active_sessions.keys()):
+            if k[0] == src_ip or k[1] == src_ip:
+                del self.active_sessions[k]
+
+        evicted_mods = 0
+        leaf_dpids = getattr(self.app.topology, 'leaf_switches', [])
+        for dpid in leaf_dpids:
+            dp = self.app.topology.get_datapath(dpid)
+            if not dp:
+                continue
+            ofproto = dp.ofproto
+            parser = dp.ofproto_parser
+            for match in (
+                parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_src=src_ip),
+                parser.OFPMatch(eth_type=const.ETH_TYPE_IP, ipv4_dst=src_ip),
+            ):
+                mod = parser.OFPFlowMod(
+                    datapath=dp,
+                    command=ofproto.OFPFC_DELETE,
+                    out_group=ofproto.OFPG_ANY,
+                    out_port=ofproto.OFPP_ANY,
+                    match=match,
+                    cookie=const.COOKIE_MTD_GRACE,
+                    cookie_mask=const.COOKIE_MASK_EXACT,
+                    table_id=const.TABLE_GRACE
+                )
+                dp.send_msg(mod)
+                self.flow_mod_count += 1
+                evicted_mods += 1
+
+        if evicted_mods > 0:
+            self.app.logger.info(
+                f"🛡️ [Table 1 Eviction] Evicted flagged threat source {src_ip} from TABLE_GRACE ({evicted_mods} FlowMods)"
+            )
+        return evicted_mods
+
     def flush_table(self, datapath, table_id):
         """Deletes all flows in the specified table."""
         ofproto = datapath.ofproto

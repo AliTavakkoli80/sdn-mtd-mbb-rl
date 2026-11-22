@@ -274,18 +274,21 @@ class MTDEngine:
 
     def step(self, action=1, enable_mbb=True):
         """Executes the network shuffle based on the chosen action."""
+        mutated_hosts = None
         if action == 2:
             self.app.logger.info("🎯 [MTD] Executing TARGETED IP Shuffle...")
             new_mapping = self._generate_targeted_mapping()
-            # Control plane flow modification cost for targeted MTD (2 hosts * 4 rules = 8 flowmods)
-            self.app.flow_manager.flow_mod_count += 8
+            mutated_hosts = [
+                r for r in self.real_ips
+                if new_mapping.get(r) != self.current_mapping.get(r)
+            ]
         elif action == 1:
             self.app.logger.info("🎲 [MTD] Executing GLOBAL IP Shuffle...")
             new_mapping = self._generate_random_mapping()
-            # Control plane flow modification cost for global MTD (10 hosts * 4 rules = 40 flowmods)
-            self.app.flow_manager.flow_mod_count += 40
+        else:
+            return
             
-        self.apply_mapping(new_mapping, enable_mbb=enable_mbb)
+        self.apply_mapping(new_mapping, enable_mbb=enable_mbb, mutated_hosts=mutated_hosts)
 
     def _generate_targeted_mapping(self):
         """Generates a new mapping, changing only IPs currently being scanned."""
@@ -332,8 +335,9 @@ class MTDEngine:
             mapping[real_ip] = available.pop()
         return mapping
 
-    def apply_mapping(self, new_mapping, enable_mbb=True):
+    def apply_mapping(self, new_mapping, enable_mbb=True, mutated_hosts=None):
         """Applies new mapping with Make-Before-Break grace period (if enable_mbb=True)."""
+        mutated_set = set(mutated_hosts) if mutated_hosts is not None else None
         if enable_mbb:
             now = time.time()
             # 1. Prune expired sessions, retain active unexpired sessions across rapid shuffles
@@ -344,9 +348,17 @@ class MTDEngine:
                 if src in threat_sources:
                     del self.app.flow_manager.active_sessions[(src, dst)]
 
-            active_sessions = self.app.flow_manager.active_sessions.copy()
+            if mutated_set is not None:
+                active_sessions = {
+                    (src, dst): v for (src, dst), v in self.app.flow_manager.active_sessions.items()
+                    if dst in mutated_set or src in mutated_set
+                }
+            else:
+                active_sessions = self.app.flow_manager.active_sessions.copy()
+
             # Mark the start of the grace period for sessions moving to Table 1
-            for k, v in self.app.flow_manager.active_sessions.items():
+            for k in active_sessions:
+                v = self.app.flow_manager.active_sessions.get(k)
                 if isinstance(v, dict) and v.get('shuffled_at') is None:
                     v['shuffled_at'] = now
 
@@ -357,10 +369,15 @@ class MTDEngine:
             self.app.logger.info(f"⚡ [MTD] Stateless Shuffle (Make-Before-Break DISABLED) - flushing Table 1...")
             for dpid, dp in self.app.topology.datapath_list.items():
                 self.app.flow_manager.flush_table(dp, table_id=const.TABLE_GRACE)
-            self.app.flow_manager.active_sessions.clear()
+            if mutated_set is not None:
+                for (src, dst) in list(self.app.flow_manager.active_sessions.keys()):
+                    if dst in mutated_set or src in mutated_set:
+                        del self.app.flow_manager.active_sessions[(src, dst)]
+            else:
+                self.app.flow_manager.active_sessions.clear()
         
-        # 2. Flush Table 0 (Active) translation flows on edge (leaf) switches only
-        self._flush_old_flows()
+        # 2. Flush Table 0 (Active) translation flows on edge (leaf) switches
+        self._flush_old_flows(mutated_hosts=mutated_hosts)
         
         # 3. Update internal state
         self.previous_mapping = self.current_mapping.copy()
@@ -370,7 +387,7 @@ class MTDEngine:
         
         # 4. In MBB mode, do NOT wipe active_sessions immediately with .clear()!
         # Sessions are retained with per-session created_at timestamps until their grace timer expires.
-        if not enable_mbb:
+        if not enable_mbb and mutated_set is None:
             self.app.flow_manager.active_sessions.clear()
         
         mode_str = "120s grace period (15s idle)" if enable_mbb else "Stateless Hard Drop"
@@ -378,12 +395,18 @@ class MTDEngine:
         for r, v in sorted(new_mapping.items()):
             self.app.logger.info(f"   {r} ⇄ {v}")
 
-    def _flush_old_flows(self):
+    def _flush_old_flows(self, mutated_hosts=None):
         """Deletes translation flows in the ACTIVE table (Table 0) across edge (leaf) switches, preserving core transit rules."""
         leaf_dpids = self.app.topology.leaf_switches
         for dpid in leaf_dpids:
             dp = self.app.topology.get_datapath(dpid)
-            if dp:
+            if not dp:
+                continue
+            if mutated_hosts is not None:
+                for real_ip in mutated_hosts:
+                    old_vip = self.current_mapping.get(real_ip)
+                    self.app.flow_manager.flush_targeted_translation_flows(dp, real_ip, old_vip)
+            else:
                 self.app.flow_manager.flush_translation_flows(dp)
 
     def _install_session_grace_flows(self, sessions):

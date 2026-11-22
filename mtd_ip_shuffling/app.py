@@ -59,13 +59,16 @@ class MTDStateAPI(ControllerBase):
 
     @route('mtd', '/mtd/state', methods=['GET'])
     def get_state(self, req, **kwargs):
-        """Returns the 7D observation vector + metadata."""
+        """Returns the 8D observation vector components + controller metadata."""
         try:
             threat_state = self.mtd_app.threat_detector.get_state().tolist()
             intensity = self.mtd_app.threat_detector.get_max_intensity()
             flows = self.mtd_app.flow_manager.get_active_flow_count()
             scanned = self.mtd_app.threat_detector.get_scanned_targets()
             is_attack = bool(self.mtd_app.threat_detector.is_under_attack)
+            flagged_sources = list(self.mtd_app.threat_detector.get_flagged_threat_sources())
+            for src_ip in flagged_sources:
+                self.mtd_app.flow_manager.evict_threat_source_from_grace(src_ip)
             
             response_data = {
                 'threat_state': threat_state,
@@ -73,6 +76,7 @@ class MTDStateAPI(ControllerBase):
                 'active_flows': int(flows),
                 'active_sessions': len(getattr(self.mtd_app.flow_manager, 'active_sessions', {})),
                 'scanned_targets': scanned,
+                'flagged_sources': flagged_sources,
                 'is_under_attack': is_attack,
                 'real_to_virtual': dict(self.mtd_app.real_to_virtual),
                 'current_mapping': dict(self.mtd_app.real_to_virtual)

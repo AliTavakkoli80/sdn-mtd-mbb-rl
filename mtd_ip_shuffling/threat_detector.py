@@ -114,6 +114,14 @@ class ThreatDetector:
         if score > self.max_threat_score:
             self.max_threat_score = score
             self.last_high_threat_time = timestamp
+
+        # Algorithm 1 Phase 2: Active Table 1 threat session eviction upon threshold breach
+        if score >= self.ATTACK_THRESHOLD and not src.get('is_flagged', False):
+            src['is_flagged'] = True
+            if hasattr(self.app, 'flow_manager') and hasattr(self.app.flow_manager, 'evict_threat_source_from_grace'):
+                self.app.flow_manager.evict_threat_source_from_grace(src_ip)
+        elif score < self.CLEAR_THRESHOLD and src.get('is_flagged', False):
+            src['is_flagged'] = False
             
         if self.max_threat_score > self.ATTACK_THRESHOLD and not self.is_under_attack:
             self.is_under_attack = True
