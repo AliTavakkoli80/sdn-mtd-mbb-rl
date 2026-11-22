@@ -25,7 +25,7 @@ This repository implements a stateful, zero-downtime SDN-MTD framework that addr
 ## Repository Structure
 
 ```text
-MTD/
+sdn-mtd-mbb-rl/
 ├── mtd_ip_shuffling/              # Modular Ryu OpenFlow 1.3 SDN-MTD controller
 │   ├── app.py                     # Main RyuApp, OpenFlow event hooks, and WSGI REST API (/mtd/*)
 │   ├── config.py                  # Protected 16-host real-to-virtual IP mappings & DNS config
@@ -140,8 +140,8 @@ Choose either `venv` (recommended for matching the reference testbed) or `conda`
 
 #### Option A: Python `venv`
 ```bash
-git clone https://github.com/AliTavakkoli80/MTD.git
-cd MTD
+git clone https://github.com/AliTavakkoli80/sdn-mtd-mbb-rl.git
+cd sdn-mtd-mbb-rl
 
 python3.9 -m venv .venv
 source .venv/bin/activate
@@ -151,8 +151,8 @@ pip install -r requirements.txt
 
 #### Option B: Conda / Mamba
 ```bash
-git clone https://github.com/AliTavakkoli80/MTD.git
-cd MTD
+git clone https://github.com/AliTavakkoli80/sdn-mtd-mbb-rl.git
+cd sdn-mtd-mbb-rl
 
 conda env create -f environment.yml
 conda activate sdn-mtd
@@ -256,7 +256,7 @@ If you use this software or benchmark suite in your research, please cite our El
   title   = {{MTD}: Zero-Downtime Stateful SDN Moving Target Defense Framework},
   version = {v1.0.0},
   year    = {2026},
-  url     = {https://github.com/AliTavakkoli80/MTD},
+  url     = {https://github.com/AliTavakkoli80/sdn-mtd-mbb-rl},
   license = {MIT}
 }
 ```

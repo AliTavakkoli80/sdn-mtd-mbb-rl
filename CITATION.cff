@@ -9,8 +9,8 @@ authors:
 version: "v1.0.0"
 date-released: "2026-11-22"
 license: "MIT"
-repository-code: "https://github.com/AliTavakkoli80/MTD"
-url: "https://github.com/AliTavakkoli80/MTD"
+repository-code: "https://github.com/AliTavakkoli80/sdn-mtd-mbb-rl"
+url: "https://github.com/AliTavakkoli80/sdn-mtd-mbb-rl"
 abstract: >-
   A stateful, zero-downtime Moving Target Defense (MTD) framework for
   Software-Defined Networks (SDN). Implements an OpenFlow 1.3 Make-Before-Break
