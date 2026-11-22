@@ -237,23 +237,30 @@ Outputs (CSVs, trained `.zip` checkpoints, and `.pdf`/`.png` figures) are writte
 
 ---
 
+## Authors
+
+- **Ali Tavakkoli** — [![ORCID](https://img.shields.io/badge/ORCID-0009--0002--9036--730X-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0009-0002-9036-730X)
+- **Hamid Haj Seyyed Javadi** — [![ORCID](https://img.shields.io/badge/ORCID-0000--0003--0082--036X-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0000-0003-0082-036X) *(Shahed University)*
+
+---
+
 ## Citation
 
 If you use this software or benchmark suite in your research, please cite our Elsevier *Array* paper and software archive:
 
 ```bibtex
 @article{tavakkoli2026zerodowntime,
-  title   = {Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning},
-  author  = {Tavakkoli, Ali},
-  journal = {Array},
+  title     = {Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning},
+  author    = {Tavakkoli, Ali and Haj Seyyed Javadi, Hamid},
+  journal   = {Array},
   publisher = {Elsevier},
-  year    = {2026},
-  note    = {Submitted for publication}
+  year      = {2026},
+  note      = {Submitted for publication}
 }
 
 @software{tavakkoli2026mtd_software,
-  author  = {Tavakkoli, Ali},
-  title   = {{MTD}: Zero-Downtime Stateful SDN Moving Target Defense Framework},
+  author  = {Tavakkoli, Ali and Haj Seyyed Javadi, Hamid},
+  title   = {{sdn-mtd-mbb-rl}: Zero-Downtime Stateful SDN Moving Target Defense Framework},
   version = {v1.0.0},
   year    = {2026},
   url     = {https://github.com/AliTavakkoli80/sdn-mtd-mbb-rl},
