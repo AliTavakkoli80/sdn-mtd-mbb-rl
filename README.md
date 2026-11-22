@@ -239,8 +239,9 @@ Outputs (CSVs, trained `.zip` checkpoints, and `.pdf`/`.png` figures) are writte
 
 ## Authors
 
-- **Ali Tavakkoli** — [![ORCID](https://img.shields.io/badge/ORCID-0009--0002--9036--730X-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0009-0002-9036-730X)
-- **Hamid Haj Seyyed Javadi** — [![ORCID](https://img.shields.io/badge/ORCID-0000--0003--0082--036X-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0000-0003-0082-036X) *(Shahed University)*
+- **Ali Tavakkoli** — [![ORCID](https://img.shields.io/badge/ORCID-0009--0002--9036--730X-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0009-0002-9036-730X) *(Shahed University)*
+- **Hamid Haj Seyyed Javadi** *(Corresponding Author)* — [![ORCID](https://img.shields.io/badge/ORCID-0000--0003--0082--036X-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0000-0003-0082-036X) *(Shahed University)*
+- **Muhammad Kourosh Dadsetani** (`M.K. Dadsetani`) — [![ORCID](https://img.shields.io/badge/ORCID-0009--0002--9540--7593-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0009-0002-9540-7593) *(Shahed University)*
 
 ---
 
@@ -251,7 +252,7 @@ If you use this software or benchmark suite in your research, please cite our El
 ```bibtex
 @article{tavakkoli2026zerodowntime,
   title     = {Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning},
-  author    = {Tavakkoli, Ali and Haj Seyyed Javadi, Hamid},
+  author    = {Tavakkoli, Ali and Haj Seyyed Javadi, Hamid and Dadsetani, Muhammad Kourosh},
   journal   = {Array},
   publisher = {Elsevier},
   year      = {2026},
@@ -259,7 +260,7 @@ If you use this software or benchmark suite in your research, please cite our El
 }
 
 @software{tavakkoli2026mtd_software,
-  author  = {Tavakkoli, Ali and Haj Seyyed Javadi, Hamid},
+  author  = {Tavakkoli, Ali and Haj Seyyed Javadi, Hamid and Dadsetani, Muhammad Kourosh},
   title   = {{sdn-mtd-mbb-rl}: Zero-Downtime Stateful SDN Moving Target Defense Framework},
   version = {v1.0.0},
   year    = {2026},
