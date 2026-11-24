@@ -297,7 +297,7 @@ Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff)
   publisher    = {Zenodo},
   doi          = {10.5281/zenodo.24514842},
   url          = {https://doi.org/10.5281/zenodo.24514842},
-  note         = {Version v1.0.0, MIT License}
+  note         = {Version v1.0.1, MIT License}
 }
 ```
 
