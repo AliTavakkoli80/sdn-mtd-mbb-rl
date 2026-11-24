@@ -271,7 +271,7 @@ All generated CSVs, model checkpoints (`.zip`), and figures (`.pdf`/`.png`) are 
   *Department of Computer Engineering, Shahed University, Tehran, Iran*
 - **M.K. Dadsetani** — [![ORCID](https://img.shields.io/badge/ORCID-0009--0002--9540--7593-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0009-0002-9540-7593)  
   *Department of Computer Engineering, Shahed University, Tehran, Iran*
-- **Mohsen Niknezhad Someh** — [![ORCID](https://img.shields.io/badge/ORCID-0009--0002--8657--367X-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0009-0002-8657-367X)  
+- **Mohsen Niknezhad** — [![ORCID](https://img.shields.io/badge/ORCID-0009--0002--8657--367X-A6CE39?logo=orcid&logoColor=white)](https://orcid.org/0009-0002-8657-367X)  
   *Department of Computer Engineering, Shahed University, Tehran, Iran*
 
 ---
@@ -283,7 +283,7 @@ Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff)
 ```bibtex
 @article{tavakkoli2026zerodowntime,
   title     = {Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning},
-  author    = {Tavakkoli, Ali and Javadi, Hamid H.S. and Dadsetani, M.K. and Niknezhad Someh, Mohsen},
+  author    = {Tavakkoli, Ali and Javadi, Hamid H.S. and Dadsetani, M.K. and Niknezhad, Mohsen},
   journal   = {Array},
   publisher = {Elsevier},
   year      = {2026},
@@ -291,7 +291,7 @@ Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff)
 }
 
 @misc{tavakkoli2026mtd_software,
-  author       = {Tavakkoli, Ali and Javadi, Hamid H.S. and Dadsetani, M.K. and Niknezhad Someh, Mohsen},
+  author       = {Tavakkoli, Ali and Javadi, Hamid H.S. and Dadsetani, M.K. and Niknezhad, Mohsen},
   title        = {{sdn-mtd-mbb-rl}: Zero-Downtime Stateful SDN Moving Target Defense Framework},
   year         = {2026},
   publisher    = {Zenodo},
