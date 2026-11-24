@@ -4,7 +4,7 @@
 [![Python 3.9](https://img.shields.io/badge/Python-3.9.25-blue.svg)](https://www.python.org/downloads/release/python-3925/)
 [![OpenFlow 1.3](https://img.shields.io/badge/SDN-OpenFlow_1.3-green.svg)](https://opennetworking.org/)
 [![Ryu 4.34](https://img.shields.io/badge/Controller-Ryu_4.34-0078D7.svg)](https://ryu-sdn.org/)
-[![Zenodo](https://img.shields.io/badge/Zenodo-Archive_Pending_DOI-blue.svg)](https://zenodo.org/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24514842.svg)](https://doi.org/10.5281/zenodo.24514842)
 
 > **Official reproducibility artifact** for the Elsevier *Array* manuscript:  
 > *Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning*  
@@ -294,7 +294,9 @@ Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff)
   author       = {Tavakkoli, Ali and Javadi, Hamid H.S. and Dadsetani, M.K. and Niknezhad Someh, Mohsen},
   title        = {{sdn-mtd-mbb-rl}: Zero-Downtime Stateful SDN Moving Target Defense Framework},
   year         = {2026},
-  howpublished = {\url{https://github.com/AliTavakkoli80/sdn-mtd-mbb-rl}},
+  publisher    = {Zenodo},
+  doi          = {10.5281/zenodo.24514842},
+  url          = {https://doi.org/10.5281/zenodo.24514842},
   note         = {Version v1.0.0, MIT License}
 }
 ```

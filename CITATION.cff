@@ -24,6 +24,7 @@ authors:
     email: "mohsen.niknezhad@shahed.ac.ir"
     affiliation: "Department of Computer Engineering, Shahed University"
 version: "v1.0.0"
+doi: "10.5281/zenodo.24514842"
 date-released: "2026-11-24"
 license: "MIT"
 repository-code: "https://github.com/AliTavakkoli80/sdn-mtd-mbb-rl"
