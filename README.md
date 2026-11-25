@@ -4,7 +4,7 @@
 [![Python 3.9](https://img.shields.io/badge/Python-3.9.25-blue.svg)](https://www.python.org/downloads/release/python-3925/)
 [![OpenFlow 1.3](https://img.shields.io/badge/SDN-OpenFlow_1.3-green.svg)](https://opennetworking.org/)
 [![Ryu 4.34](https://img.shields.io/badge/Controller-Ryu_4.34-0078D7.svg)](https://ryu-sdn.org/)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24515480.svg)](https://doi.org/10.5281/zenodo.24515480)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24543286.svg)](https://doi.org/10.5281/zenodo.24543286)
 
 > **Official reproducibility artifact** for the Elsevier *Array* manuscript:  
 > *Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning*
@@ -292,8 +292,8 @@ Machine-readable citation metadata is provided in [`CITATION.cff`](CITATION.cff)
   title        = {{sdn-mtd-mbb-rl}: Zero-Downtime Stateful SDN Moving Target Defense Framework},
   year         = {2026},
   publisher    = {Zenodo},
-  doi          = {10.5281/zenodo.24515480},
-  url          = {https://doi.org/10.5281/zenodo.24515480},
+  doi          = {10.5281/zenodo.24543286},
+  url          = {https://doi.org/10.5281/zenodo.24543286},
   note         = {Version v1.0.2, MIT License}
 }
 ```
