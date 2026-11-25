@@ -183,10 +183,13 @@ core.*
 *.snm
 *.vrb
 
-# Keep only the final compiled manuscript PDF in paper/
-paper/*
-!paper/main.pdf
+# Exclude manuscript and submission files
+paper/
+paper.zip
 /paper*.zip
+submission_ready/
+highlights.docx
+highlights.txt
 
 # Spyder project settings
 .spyderproject

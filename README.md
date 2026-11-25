@@ -7,8 +7,7 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24515480.svg)](https://doi.org/10.5281/zenodo.24515480)
 
 > **Official reproducibility artifact** for the Elsevier *Array* manuscript:  
-> *Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning*  
-> Manuscript PDF: [`paper/main.pdf`](paper/main.pdf)
+> *Zero-Downtime Moving Target Defense in Software-Defined Networks: Stateful Make-Before-Break Mutation via Multi-Objective Reinforcement Learning*
 
 ---
 
@@ -125,8 +124,6 @@ sdn-mtd-mbb-rl/
 │   │   ├── large_topology.py      # Extended topology template
 │   │   └── host-docker/Dockerfile # Alpine Linux host image (dnsmasq, iperf3, curl, python3)
 │   └── GNS3/                      # Legacy GNS3 OVS setup notes and dnsmasq template
-├── paper/
-│   └── main.pdf                   # Compiled manuscript PDF
 ├── finetune_pipeline.sh           # End-to-end Stage 2 Sim-to-Real fine-tuning & evaluation
 ├── run_factorial_benchmark.sh     # Automated 2x5 factorial benchmark runner (10 cells)
 ├── run_all_benchmarks.sh          # Automated MBB dataplane + canonical baseline runner
